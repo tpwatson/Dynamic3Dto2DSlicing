@@ -1,0 +1,929 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Layered-Painting Walking Sim (WebGL2)</title>
+<style>
+  html,body{margin:0;height:100%;background:#111;color:#ddd;font-family:system-ui}
+  #ui{position:fixed;left:12px;top:72px;z-index:9;background:#0008;padding:8px 10px;border-radius:8px;max-width:360px}
+  #ui label{display:block;font-size:12px;margin:6px 0 2px}
+  #ui input[type=range]{width:220px;vertical-align:middle}
+  #ui .val{display:inline-block;width:70px;text-align:right;font-size:12px;opacity:0.9}
+  canvas{display:block;width:100vw;height:100vh}
+  .btn{display:inline-block;background:#222;border:1px solid #444;padding:6px 8px;border-radius:6px;cursor:pointer}
+</style>
+</head>
+<body>
+<div id="ui">
+  <div><b>Layered Painting</b> — WASD to move, mouse to look. Click canvas to lock cursor.</div>
+  <div>Layers: 14 • Stroke size: 8px • 5% random variation</div>
+  <div id="status">loading heightmap…</div>
+  <div style="margin-top:6px"><span class="btn" id="recenter">Recenter (R)</span></div>
+  <div style="margin-top:8px">
+    <label>View Far <span class="val" id="v_viewFar"></span></label>
+    <input id="ctl_viewFar" type="range" min="50" max="50000" step="10">
+    <label>Layer Max Dist <span class="val" id="v_layerMax"></span></label>
+    <input id="ctl_layerMax" type="range" min="50" max="20000" step="10">
+    <label>Stroke Px <span class="val" id="v_stroke"></span></label>
+    <input id="ctl_stroke" type="range" min="2" max="48" step="1">
+    <label>Variation <span class="val" id="v_var"></span></label>
+    <input id="ctl_var" type="range" min="0" max="0.6" step="0.01">
+    <label>Height Scale <span class="val" id="v_hscale"></span></label>
+    <input id="ctl_hscale" type="range" min="10" max="1500" step="10">
+    <label>Checker Size <span class="val" id="v_chkSize"></span></label>
+    <input id="ctl_chkSize" type="range" min="1" max="200" step="1">
+    <label>Checker Opacity <span class="val" id="v_chkAlpha"></span></label>
+    <input id="ctl_chkAlpha" type="range" min="0" max="1" step="0.01">
+    <label>Layer Passes (perf) <span class="val" id="v_layerPasses"></span></label>
+    <input id="ctl_layerPasses" type="range" min="1" max="14" step="1">
+    <label>Layer Res Scale (perf) <span class="val" id="v_resScale"></span></label>
+    <input id="ctl_resScale" type="range" min="0.25" max="1" step="0.05">
+    <label><input id="ctl_lockLayer" type="checkbox" checked> Lock Layer Max to View Far</label>
+  </div>
+</div>
+  <div style="margin-top:8px">
+    <label>Preview Band (isolated)</label>
+    <div id="bands"></div>
+  </div>
+<canvas id="gl"></canvas>
+
+<script>
+/*** ---------- Config ---------- ***/
+const HEIGHTMAP_DATA_URL = `heightmap2.png`;
+/*
+If you want to use your file instead, e.g. "heightmap.png", put it in same folder and:
+const HEIGHTMAP_DATA_URL = "heightmap.png";
+*/
+
+// Generate a procedural heightmap instead of loading external files
+function generateHeightmap(width, height) {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  
+  // Create a gradient background (lowlands)
+  const gradient = ctx.createLinearGradient(0, 0, width, height);
+  gradient.addColorStop(0, '#2d4a2d');   // Dark green
+  gradient.addColorStop(0.5, '#4a6b4a'); // Medium green
+  gradient.addColorStop(1, '#2d4a2d');   // Dark green
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, width, height);
+  
+  // Add mountains using multiple noise layers
+  for (let i = 0; i < 5; i++) {
+    const scale = 50 + i * 30;
+    const amplitude = 0.3 - i * 0.05;
+    const offsetX = Math.random() * 1000;
+    const offsetY = Math.random() * 1000;
+    
+    for (let x = 0; x < width; x++) {
+      for (let y = 0; y < height; y++) {
+        const noise = (Math.sin((x + offsetX) / scale) * Math.cos((y + offsetY) / scale) + 1) / 2;
+        const current = ctx.getImageData(x, y, 1, 1).data[0] / 255;
+        const newValue = Math.min(1, current + noise * amplitude);
+        
+        // Color based on height
+        let r, g, b;
+        if (newValue < 0.4) {
+          // Lowlands - green
+          r = 45; g = 74; b = 45;
+        } else if (newValue < 0.7) {
+          // Midlands - brown
+          r = 139; g = 115; b = 85;
+        } else {
+          // Highlands - white/snow
+          r = 240; g = 240; b = 245;
+        }
+        
+        ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+        ctx.fillRect(x, y, 1, 1);
+      }
+    }
+  }
+  
+  return canvas;
+}
+
+// Use external heightmap image provided by user
+const FINAL_DATA_URL = HEIGHTMAP_DATA_URL;
+
+// Terrain resolution (vertices per side)
+const GRID = 2048;           // try 128–512
+const SIZE = 5000.0;         // world size (XZ span)
+const HEIGHT_SCALE = 2400.0; // how tall the white peaks get
+
+// Movement
+const SPEED = 80.0;         // m/s
+const LOOK_SENS = 0.0023;   // mouse
+const JUMP = 8.0;           // simple hop
+const GRAV = 25.0;
+const EYE_HEIGHT = 2.0;     // player eye height above terrain
+
+// Painterly / layers
+const LAYERS = 14;
+let VIEW_FAR = 50000.0;          // camera far plane (true view distance)
+let LAYER_MAX_DIST = 1000.0;    // stylization range used for banding/fog
+let STROKE_PX = 2.0;          // base “pixel/brush” size (screen-space)
+let VARIATION = 0.0;         // 5% size variation
+let CHECKER_SIZE = 4.0;      // world units per checker cell
+let CHECKER_ALPHA = 0.04;      // overlay opacity (0..1)
+let LAYER_PASSES = 14;         // how many bands to render (near-first)
+let RES_SCALE = 0.25;           // 1.0 = full res, <1 = render to smaller FBOs
+let LOCK_LAYER_TO_VIEW = true; // keep LAYER_MAX_DIST tracking VIEW_FAR
+
+/*** ---------- WebGL2 Boilerplate ---------- ***/
+const canvas = document.getElementById('gl');
+const statusEl = document.getElementById('status');
+const recenterBtn = document.getElementById('recenter');
+
+let gl; // declare before first use (resize() checks this)
+// Forward declare offscreen layer resources so we can init before definitions
+let layerFbos, layerTexs, layerDepth;
+
+function resize() {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const w = Math.floor(window.innerWidth * dpr);
+  const h = Math.floor(window.innerHeight * dpr);
+  canvas.width = w; canvas.height = h;
+  canvas.style.width = '100vw'; canvas.style.height = '100vh';
+  // Recreate FBOs after gl is initialized in boot sequence
+  if(typeof gl !== 'undefined' && gl){ createLayerTargets(); }
+}
+resize(); addEventListener('resize', resize);
+
+gl = canvas.getContext('webgl2', {antialias:false, alpha:false});
+if(!gl){ alert('WebGL2 required'); throw new Error('No WebGL2'); }
+// Initialize layer targets once GL exists
+createLayerTargets();
+
+// UI bindings
+const ctlViewFar = document.getElementById('ctl_viewFar');
+const ctlLayerMax = document.getElementById('ctl_layerMax');
+const ctlStroke = document.getElementById('ctl_stroke');
+const ctlVar = document.getElementById('ctl_var');
+const ctlHScale = document.getElementById('ctl_hscale');
+const ctlChkSize = document.getElementById('ctl_chkSize');
+const ctlChkAlpha = document.getElementById('ctl_chkAlpha');
+const ctlLayerPasses = document.getElementById('ctl_layerPasses');
+const ctlResScale = document.getElementById('ctl_resScale');
+const ctlLockLayer = document.getElementById('ctl_lockLayer');
+const ctlFogStart = document.getElementById('ctl_fogStart');
+const ctlFogStrength = document.getElementById('ctl_fogStrength');
+const vViewFar = document.getElementById('v_viewFar');
+const vLayerMax = document.getElementById('v_layerMax');
+const vStroke = document.getElementById('v_stroke');
+const vVar = document.getElementById('v_var');
+const vHScale = document.getElementById('v_hscale');
+const vChkSize = document.getElementById('v_chkSize');
+const vChkAlpha = document.getElementById('v_chkAlpha');
+const vLayerPasses = document.getElementById('v_layerPasses');
+const vResScale = document.getElementById('v_resScale');
+const vFogStart = document.getElementById('v_fogStart');
+const vFogStrength = document.getElementById('v_fogStrength');
+const bandsDiv = document.getElementById('bands');
+
+function syncUI(){
+  ctlViewFar.value = VIEW_FAR;
+  ctlLayerMax.value = LAYER_MAX_DIST;
+  ctlStroke.value = STROKE_PX;
+  ctlVar.value = VARIATION;
+  ctlHScale.value = HEIGHT_SCALE;
+  ctlChkSize.value = CHECKER_SIZE;
+  ctlChkAlpha.value = CHECKER_ALPHA;
+  ctlLayerPasses.value = LAYER_PASSES;
+  ctlResScale.value = RES_SCALE;
+  ctlLockLayer.checked = LOCK_LAYER_TO_VIEW;
+    if(ctlFogStart) ctlFogStart.value = FOG_START_FRACTION;
+    if(ctlFogStrength) ctlFogStrength.value = FOG_STRENGTH;
+  vViewFar.textContent = VIEW_FAR.toFixed(0);
+  vLayerMax.textContent = LAYER_MAX_DIST.toFixed(0);
+  vStroke.textContent = STROKE_PX.toFixed(0);
+  vVar.textContent = VARIATION.toFixed(2);
+  vHScale.textContent = HEIGHT_SCALE.toFixed(0);
+  vChkSize.textContent = CHECKER_SIZE.toFixed(0);
+  vChkAlpha.textContent = CHECKER_ALPHA.toFixed(2);
+  vLayerPasses.textContent = LAYER_PASSES.toString();
+  vResScale.textContent = RES_SCALE.toFixed(2);
+    if(vFogStart) vFogStart.textContent = FOG_START_FRACTION.toFixed(2);
+    if(vFogStrength) vFogStrength.textContent = FOG_STRENGTH.toFixed(2);
+}
+syncUI();
+
+// Build band preview buttons 0..13 and an All toggle
+function buildBandButtons(){
+  bandsDiv.innerHTML = '';
+  const btnAll = document.createElement('span');
+  btnAll.className = 'btn';
+  btnAll.textContent = 'All';
+  btnAll.onclick = ()=>{ activeBand = -1; };
+  bandsDiv.appendChild(btnAll);
+  for(let i=0;i<LAYERS;i++){
+    const b = document.createElement('span');
+    b.className = 'btn';
+    b.style.marginLeft = '4px';
+    b.textContent = String(i+1);
+    b.onclick = ()=>{ activeBand = i; };
+    bandsDiv.appendChild(b);
+  }
+}
+buildBandButtons();
+
+ctlViewFar.addEventListener('input', ()=>{ VIEW_FAR = Number(ctlViewFar.value); vViewFar.textContent = VIEW_FAR.toFixed(0); });
+ctlLayerMax.addEventListener('input', ()=>{ LAYER_MAX_DIST = Number(ctlLayerMax.value); vLayerMax.textContent = LAYER_MAX_DIST.toFixed(0); });
+ctlStroke.addEventListener('input', ()=>{ STROKE_PX = Number(ctlStroke.value); vStroke.textContent = STROKE_PX.toFixed(0); });
+ctlVar.addEventListener('input', ()=>{ VARIATION = Number(ctlVar.value); vVar.textContent = VARIATION.toFixed(2); });
+ctlHScale.addEventListener('change', ()=>{ // rebuild terrain with new vertical scale
+  HEIGHT_SCALE = Number(ctlHScale.value);
+  vHScale.textContent = HEIGHT_SCALE.toFixed(0);
+  statusEl.textContent = 'rebuilding terrain…';
+  // Re-load and rebuild to apply new scale consistently
+  loadImage(FINAL_DATA_URL).then(img=>{ buildTerrainFromImage(img); statusEl.textContent='ready.'; });
+});
+ctlChkSize.addEventListener('input', ()=>{ CHECKER_SIZE = Number(ctlChkSize.value); vChkSize.textContent = CHECKER_SIZE.toFixed(0); });
+ctlChkAlpha.addEventListener('input', ()=>{ CHECKER_ALPHA = Number(ctlChkAlpha.value); vChkAlpha.textContent = CHECKER_ALPHA.toFixed(2); });
+ctlLayerPasses.addEventListener('input', ()=>{ LAYER_PASSES = Math.max(1, Math.min(LAYERS, Number(ctlLayerPasses.value))); vLayerPasses.textContent = LAYER_PASSES.toString(); });
+ctlResScale.addEventListener('input', ()=>{ RES_SCALE = Number(ctlResScale.value); vResScale.textContent = RES_SCALE.toFixed(2); createLayerTargets(); });
+ctlLockLayer.addEventListener('change', ()=>{ LOCK_LAYER_TO_VIEW = ctlLockLayer.checked; if(LOCK_LAYER_TO_VIEW){ LAYER_MAX_DIST = VIEW_FAR; ctlLayerMax.value = LAYER_MAX_DIST; vLayerMax.textContent = LAYER_MAX_DIST.toFixed(0);} });
+ctlViewFar.addEventListener('input', ()=>{ if(LOCK_LAYER_TO_VIEW){ LAYER_MAX_DIST = VIEW_FAR; ctlLayerMax.value = LAYER_MAX_DIST; vLayerMax.textContent = LAYER_MAX_DIST.toFixed(0);} });
+if(ctlFogStart){
+  ctlFogStart.addEventListener('input', ()=>{ FOG_START_FRACTION = Number(ctlFogStart.value); if(vFogStart) vFogStart.textContent = FOG_START_FRACTION.toFixed(2); });
+}
+if(ctlFogStrength){
+  ctlFogStrength.addEventListener('input', ()=>{ FOG_STRENGTH = Number(ctlFogStrength.value); if(vFogStrength) vFogStrength.textContent = FOG_STRENGTH.toFixed(2); });
+}
+
+function compile(type,src){
+  const s = gl.createShader(type);
+  gl.shaderSource(s,src); gl.compileShader(s);
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)){
+    console.error(gl.getShaderInfoLog(s)); throw new Error('shader compile');
+  }
+  return s;
+}
+function link(vs,fs){
+  const p = gl.createProgram();
+  gl.attachShader(p,vs); gl.attachShader(p,fs); gl.linkProgram(p);
+  if(!gl.getProgramParameter(p,gl.LINK_STATUS)){
+    console.error(gl.getProgramInfoLog(p)); throw new Error('link');
+  }
+  return p;
+}
+
+/*** ---------- Shaders ---------- ***/
+// We pass world position + flat color. Fragment bins distance into 14 layers and applies
+// a screen-space “brush/pixel” effect (consistent size regardless of distance).
+const VS = `#version 300 es
+layout(location=0) in vec3 a_pos;
+layout(location=1) in vec3 a_col;
+layout(location=2) in vec3 a_norm;
+
+uniform mat4 u_proj, u_view, u_model;
+
+out vec3 v_col;
+out vec3 v_world;
+out vec3 v_norm;
+out vec2 v_worldXZ; // world-space XZ for checker pattern
+out float v_eyeZ;   // positive view-space depth
+
+void main(){
+  vec4 world = u_model * vec4(a_pos,1.0);
+  v_world = world.xyz;
+  v_col = a_col;
+  // Model is identity, but keep path for clarity/extension
+  mat3 normalMat = mat3(u_model);
+  v_norm = normalize(normalMat * a_norm);
+  v_worldXZ = world.xz;
+  vec4 viewPos = u_view * world;     // view space
+  v_eyeZ = -viewPos.z;               // positive forward
+  gl_Position = u_proj * viewPos;
+}
+`;
+
+const FS = `#version 300 es
+precision highp float;
+
+in vec3 v_col;
+in vec3 v_world;
+in vec3 v_norm;
+in vec2 v_worldXZ;
+in float v_eyeZ;
+
+out vec4 o_color;
+
+uniform vec3  u_camPos;
+uniform float u_maxDist;
+uniform int   u_layers;
+uniform vec2  u_res;
+uniform float u_time;
+uniform float u_strokePx;
+uniform float u_variation;
+uniform vec3  u_lightDir;   // direction TO light (world space)
+uniform vec3  u_lightColor; // light RGB
+uniform float u_ambient;    // ambient term
+uniform float u_checkerSize; // world units per cell
+uniform float u_checkerAlpha; // opacity of checker overlay
+uniform int   u_activeBand; // -1 = render all; 0..13 = only that band (others discard)
+// fog uniforms removed (disabled)
+
+// Debug palette for 14 distance layers (index 0 = nearest, 13 = furthest)
+const vec3 PALETTE[14] = vec3[14](
+  vec3(0.02, 0.06, 0.02), // 1  black tinted green
+  vec3(0.77, 0.60, 0.42), // 2  dark tan
+  vec3(0.90, 0.78, 0.61), // 3  light tan
+  vec3(0.55, 0.23, 0.16), // 4  reddish brown
+  vec3(0.55, 0.43, 0.24), // 5  greenish brown
+  vec3(0.30, 0.69, 0.31), // 6  green
+  vec3(0.80, 0.86, 0.22), // 7  greenish yellow
+  vec3(0.11, 0.37, 0.13), // 8  dark green
+  vec3(0.50, 1.00, 0.83), // 9  light blue green
+  vec3(0.00, 0.65, 0.65), // 10 medium blue green
+  vec3(0.00, 0.30, 0.30), // 11 dark blue green
+  vec3(0.78, 0.49, 1.00), // 12 light purple
+  vec3(0.42, 0.00, 0.66), // 13 medium purple
+  vec3(0.16, 0.00, 0.33)  // 14 dark purple
+);
+
+// hash helpers
+float hash11(float p){ return fract(sin(p*127.1)*43758.5453); }
+float hash21(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
+
+// quantize into N bands (0..N-1) based on distance
+// Ensure the last band (N-1) contains everything at/above maxD
+float bandIndex(float d, float maxD, float N){
+  float eps = 1e-4;
+  float denom = max(maxD / N, eps);
+  float clamped = min(d, maxD - eps); // push values at/above maxD into final bin
+  float idx = floor(clamped / denom);
+  return clamp(idx, 0.0, N - 1.0);
+}
+
+void main(){
+  // distance from camera in view space (positive forward)
+  float d = v_eyeZ;
+  float idx = bandIndex(d, u_maxDist, float(u_layers));
+
+  // Band mask: when u_activeBand >= 0, only draw that band
+  if(u_activeBand >= 0 && int(idx) != u_activeBand){
+    discard;
+  }
+
+  // Base color from palette by distance layer
+  vec3 layerColor = PALETTE[int(idx)];
+  // Lambert lighting
+  float lambert = max(dot(normalize(v_norm), normalize(-u_lightDir)), 0.0);
+  float lightIntensity = clamp(u_ambient + lambert, 0.0, 1.5);
+  vec3 color = layerColor * lightIntensity * u_lightColor;
+
+  // World-space checkerboard (black/white), independent of distance
+  float cx = floor(v_worldXZ.x / max(1.0, u_checkerSize));
+  float cz = floor(v_worldXZ.y / max(1.0, u_checkerSize));
+  float checker = mod(cx + cz, 2.0);
+  vec3 checkerCol = mix(vec3(0.0), vec3(1.0), checker);
+  // Overlay checker onto color
+  color = mix(color, checkerCol, clamp(u_checkerAlpha, 0.0, 1.0));
+
+  // Screen-space “pseudo-pixels”: overlapping, rotated squares with ~5% size jitter
+  vec2 uv = gl_FragCoord.xy;       // screen space
+  float base = u_strokePx;
+  // small per-layer variation (±5%) so bands don't align too perfectly
+  float jitter = 1.0 + (u_variation * (hash11(idx+1.234) * 2.0 - 1.0));
+  float cell = base * jitter;
+
+  // snap to grid
+  vec2 cellId = floor(uv / cell);
+  vec2 cellCenter = (cellId + 0.5) * cell;
+
+  // per-cell randoms
+  float r = hash21(cellId + vec2(idx*13.1, idx*7.7));
+
+  // slight drift per-layer to avoid moiré when moving
+  vec2 drift = vec2(sin((idx+1.0)*0.7 + u_time*0.1), cos((idx+1.0)*0.9 + u_time*0.08)) * (cell*0.08);
+
+  // rotate square slightly per-cell
+  float ang = (r - 0.5) * 0.35; // ~±20°
+  mat2 rot = mat2(cos(ang), -sin(ang), sin(ang), cos(ang));
+  vec2 p = rot * (uv - (cellCenter + drift));
+
+  // half-size larger than cell/2 so squares overlap
+  float halfSize = 0.65 * cell;
+  // extra tiny jitter to keep sizes uneven (~±2%) layered on top of ±5%
+  halfSize *= 0.98 + 0.04 * hash21(cellId + vec2(19.7, 3.1));
+
+  // square SDF using L∞ norm, softened edges
+  float edge = max(abs(p.x), abs(p.y)) / halfSize;
+  float mask = smoothstep(1.05, 0.85, edge);
+
+  // composite: each layer paints only inside its blotch cells, but keep some coverage
+  // to avoid holes. We mix with a lighter “paper” to suggest texture.
+  vec3 paper = vec3(0.0,0.0,0.0);
+  vec3 painted = mix(color, color*0.85, 0.3 + 0.2*r); // slight variation per stamp
+
+  // fake multi-stroke feel by modulating with a second threshold
+  float ring = smoothstep(0.95, 0.7, edge);
+  painted *= (0.9 + 0.1*ring);
+
+  // depth fade per layer for separation
+  // No fog: final color is just painted
+  vec3 col = painted;
+
+  // apply mask; to guarantee fill, keep a tiny floor coverage
+  float coverage = max(mask, 0.3);
+  o_color = vec4(mix(paper, col, coverage), 1.0);
+}
+`;
+
+/*** ---------- Program & Buffers ---------- ***/
+const vs = compile(gl.VERTEX_SHADER, VS);
+const fs = compile(gl.FRAGMENT_SHADER, FS);
+const prog = link(vs, fs);
+gl.useProgram(prog);
+
+const loc = {
+  a_pos: 0, a_col: 1,
+  u_proj: gl.getUniformLocation(prog,'u_proj'),
+  u_view: gl.getUniformLocation(prog,'u_view'),
+  u_model: gl.getUniformLocation(prog,'u_model'),
+  u_camPos: gl.getUniformLocation(prog,'u_camPos'),
+  u_maxDist: gl.getUniformLocation(prog,'u_maxDist'),
+  u_layers: gl.getUniformLocation(prog,'u_layers'),
+  u_res: gl.getUniformLocation(prog,'u_res'),
+  u_time: gl.getUniformLocation(prog,'u_time'),
+  u_strokePx: gl.getUniformLocation(prog,'u_strokePx'),
+  u_variation: gl.getUniformLocation(prog,'u_variation'),
+  u_lightDir: gl.getUniformLocation(prog,'u_lightDir'),
+  u_lightColor: gl.getUniformLocation(prog,'u_lightColor'),
+  u_ambient: gl.getUniformLocation(prog,'u_ambient'),
+  u_checkerSize: gl.getUniformLocation(prog,'u_checkerSize'),
+  u_checkerAlpha: gl.getUniformLocation(prog,'u_checkerAlpha'),
+  u_activeBand: gl.getUniformLocation(prog,'u_activeBand'),
+};
+
+const vao = gl.createVertexArray();
+gl.bindVertexArray(vao);
+
+const vbo = gl.createBuffer();
+const ibo = gl.createBuffer();
+
+let indexCount = 0;
+let activeBand = -1; // -1 = all
+
+// ---------- Offscreen targets for 14 layers (color RGBA + depth) ----------
+
+function createLayerTargets(){
+  const w = canvas.width, h = canvas.height;
+  const rw = Math.max(1, Math.floor(w * RES_SCALE));
+  const rh = Math.max(1, Math.floor(h * RES_SCALE));
+  // Lazy initialize arrays on first use to ensure availability before any calls
+  if(!layerFbos) layerFbos = new Array(LAYERS);
+  if(!layerTexs) layerTexs = new Array(LAYERS);
+  if(!layerDepth) layerDepth = new Array(LAYERS);
+  for(let i=0;i<LAYERS;i++){
+    if(layerTexs[i]){ gl.deleteTexture(layerTexs[i]); layerTexs[i]=null; }
+    if(layerDepth[i]){ gl.deleteRenderbuffer(layerDepth[i]); layerDepth[i]=null; }
+    if(layerFbos[i]){ gl.deleteFramebuffer(layerFbos[i]); layerFbos[i]=null; }
+
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, rw, rh, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+
+    const rb = gl.createRenderbuffer();
+    gl.bindRenderbuffer(gl.RENDERBUFFER, rb);
+    gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, rw, rh);
+
+    const fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, rb);
+
+    const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    if(status !== gl.FRAMEBUFFER_COMPLETE){
+      console.error('FBO incomplete for layer', i, status.toString());
+    }
+    layerTexs[i] = tex;
+    layerDepth[i] = rb;
+    layerFbos[i] = fbo;
+  }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+
+// Terrain height sampling data for collision/grounding
+let terrainHeights = null; // Float32Array size w*h of heights in world units
+let terrainW = 0, terrainH = 0;
+
+function sampleTerrainHeightAtWorld(wx, wz){
+  if(!terrainHeights) return 0.0;
+  // Map world XZ in [-SIZE, SIZE] to grid coordinates [0..w-1],[0..h-1]
+  const u = (wx / (SIZE*2.0) + 0.5) * (terrainW - 1);
+  const v = (wz / (SIZE*2.0) + 0.5) * (terrainH - 1);
+  const i0 = Math.max(0, Math.min(terrainW-1, Math.floor(u)));
+  const j0 = Math.max(0, Math.min(terrainH-1, Math.floor(v)));
+  const i1 = Math.min(terrainW-1, i0+1);
+  const j1 = Math.min(terrainH-1, j0+1);
+  const fu = u - i0, fv = v - j0;
+  const h00 = terrainHeights[j0*terrainW + i0];
+  const h10 = terrainHeights[j0*terrainW + i1];
+  const h01 = terrainHeights[j1*terrainW + i0];
+  const h11 = terrainHeights[j1*terrainW + i1];
+  const h0 = h00*(1.0-fu) + h10*fu;
+  const h1 = h01*(1.0-fu) + h11*fu;
+  return h0*(1.0-fv) + h1*fv;
+}
+
+/*** ---------- Heightmap -> Terrain Mesh ---------- ***/
+function buildTerrainFromImage(img){
+  const w = GRID, h = GRID;
+  const c = document.createElement('canvas');
+  c.width = img.width; c.height = img.height;
+  const cx = c.getContext('2d');
+  cx.drawImage(img, 0, 0);
+  const imgd = cx.getImageData(0,0,img.width,img.height).data;
+
+  // sRGB -> linear helper
+  function srgbToLinear(c){
+    c = Math.max(0, Math.min(1, c));
+    if(c <= 0.04045) return c/12.92;
+    return Math.pow((c + 0.055)/1.055, 2.4);
+  }
+
+  function pixelLuminanceAt(idx){
+    const r = imgd[idx]   * (1.0/255.0);
+    const g = imgd[idx+1] * (1.0/255.0);
+    const b = imgd[idx+2] * (1.0/255.0);
+    // perceptual luma weights
+    const srgbLum = 0.2126*r + 0.7152*g + 0.0722*b;
+    return srgbToLinear(srgbLum);
+  }
+
+  // Bilinear grayscale sampling in [0,1] with sRGB->linear correction
+  function sample(x,y){
+    const xClamped = Math.max(0, Math.min(img.width-1, x));
+    const yClamped = Math.max(0, Math.min(img.height-1, y));
+    const x0 = Math.floor(xClamped);
+    const y0 = Math.floor(yClamped);
+    const x1 = Math.min(img.width-1, x0+1);
+    const y1 = Math.min(img.height-1, y0+1);
+    const fx = xClamped - x0;
+    const fy = yClamped - y0;
+
+    const idx00 = (y0*img.width + x0)*4;
+    const idx10 = (y0*img.width + x1)*4;
+    const idx01 = (y1*img.width + x0)*4;
+    const idx11 = (y1*img.width + x1)*4;
+
+    const v00 = pixelLuminanceAt(idx00);
+    const v10 = pixelLuminanceAt(idx10);
+    const v01 = pixelLuminanceAt(idx01);
+    const v11 = pixelLuminanceAt(idx11);
+
+    const v0 = v00*(1.0-fx) + v10*fx;
+    const v1 = v01*(1.0-fx) + v11*fx;
+    return v0*(1.0-fy) + v1*fy;
+  }
+
+  // Precompute heights for normals
+  const heights = new Float32Array(w*h);
+  for(let j=0;j<h;j++){
+    for(let i=0;i<w;i++){
+      const u = i/(w-1), v = j/(h-1);
+      const sx = u*(img.width-1);
+      const sy = v*(img.height-1);
+      const elev = sample(sx, sy);
+      heights[j*w + i] = elev * HEIGHT_SCALE;
+    }
+  }
+
+  const stepX = (SIZE*2.0)/(w-1);
+  const stepZ = (SIZE*2.0)/(h-1);
+
+  function getHeight(ii,jj){
+    const iC = Math.max(0, Math.min(w-1, ii));
+    const jC = Math.max(0, Math.min(h-1, jj));
+    return heights[jC*w + iC];
+  }
+
+  function computeNormal(ii,jj){
+    // Central differences with world-space scaling to avoid exaggerated slopes
+    const hl = getHeight(ii-1, jj);
+    const hr = getHeight(ii+1, jj);
+    const hu = getHeight(ii, jj-1);
+    const hd = getHeight(ii, jj+1);
+    const dx = (hr - hl) / (2 * stepX);
+    const dz = (hd - hu) / (2 * stepZ);
+    // Tangent vectors in world space
+    const tx = [1.0, dx, 0.0];
+    const tz = [0.0, dz, 1.0];
+    // n = normalize(cross(tz, tx)) to keep +Y up
+    const nx = tz[1]*tx[2] - tz[2]*tx[1];
+    const ny = tz[2]*tx[0] - tz[0]*tx[2];
+    const nz = tz[0]*tx[1] - tz[1]*tx[0];
+    const len = Math.max(1e-6, Math.hypot(nx, ny, nz));
+    return [nx/len, ny/len, nz/len];
+  }
+
+  const verts = new Float32Array(w*h*9); // pos(3)+norm(3)+col(3)
+  const ind = new Uint32Array((w-1)*(h-1)*6);
+
+  let p = 0;
+  for(let j=0;j<h;j++){
+    for(let i=0;i<w;i++){
+      const u = i/(w-1), v = j/(h-1);
+      const x = (u-0.5)*SIZE*2.0;
+      const z = (v-0.5)*SIZE*2.0;
+
+      const y = heights[j*w + i];
+      const n = computeNormal(i, j);
+
+      // flat color by height (greens to browns to snow)
+      const elevN = y / HEIGHT_SCALE;
+      let col = [0.3,0.55,0.35];
+      if(elevN>0.55) col = [0.5,0.42,0.32];
+      if(elevN>0.82) col = [0.9,0.9,0.92];
+
+      // pos
+      verts[p++] = x; verts[p++] = y; verts[p++] = z;
+      // norm
+      verts[p++] = n[0]; verts[p++] = n[1]; verts[p++] = n[2];
+      // col
+      verts[p++] = col[0]; verts[p++] = col[1]; verts[p++] = col[2];
+    }
+  }
+
+  let q=0;
+  for(let j=0;j<h-1;j++){
+    for(let i=0;i<w-1;i++){
+      const a = j*w + i;
+      const b = a + 1;
+      const c1 = a + w;
+      const d = c1 + 1;
+      ind[q++] = a; ind[q++] = c1; ind[q++] = b;
+      ind[q++] = b; ind[q++] = c1; ind[q++] = d;
+    }
+  }
+  indexCount = ind.length;
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
+
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, ind, gl.STATIC_DRAW);
+
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 36, 0);
+  gl.enableVertexAttribArray(2);
+  gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 36, 12);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 36, 24);
+
+  // expose heights for collision sampling
+  terrainHeights = heights;
+  terrainW = w;
+  terrainH = h;
+}
+
+/*** ---------- Camera / Controls ---------- ***/
+let camPos = {x:0, y:30, z:-SIZE*0.9};
+let yaw = 0, pitch = 0;
+let velY = 0;
+
+const keys = {};
+addEventListener('keydown', e=>{ keys[e.key.toLowerCase()] = true; if(e.key==='r'||e.key==='R') recenter(); });
+addEventListener('keyup', e=>{ keys[e.key.toLowerCase()] = false; });
+
+function recenter(){
+  camPos = {x:0, y:60, z:-SIZE*0.9};
+  yaw = 0; pitch = 0; velY = 0;
+  // snap to terrain if available
+  const gy = sampleTerrainHeightAtWorld(camPos.x, camPos.z);
+  camPos.y = gy + EYE_HEIGHT;
+}
+recenterBtn.onclick = recenter;
+
+canvas.addEventListener('click', ()=> canvas.requestPointerLock());
+addEventListener('mousemove', e=>{
+  if(document.pointerLockElement === canvas){
+    yaw += e.movementX * LOOK_SENS;
+    pitch += e.movementY * LOOK_SENS;
+    pitch = Math.max(-1.2, Math.min(1.2, pitch));
+  }
+});
+
+function getDir(){
+  const cy = Math.cos(yaw), sy = Math.sin(yaw);
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  // forward in XZ with pitch applied
+  return {
+    x: sy * cp,
+    y: -sp,
+    z: -cy * cp
+  };
+}
+function getRight(){
+  const cy = Math.cos(yaw), sy = Math.sin(yaw);
+  return { x: cy, y: 0, z: sy };
+}
+
+function tick(dt){
+  const f = getDir();
+  const r = getRight();
+  let mx=0,my=0,mz=0;
+  if(keys['w']){ mx += f.x; my += f.y; mz += f.z; }
+  if(keys['s']){ mx -= f.x; my -= f.y; mz -= f.z; }
+  if(keys['a']){ mx -= r.x; mz -= r.z; }
+  if(keys['d']){ mx += r.x; mz += r.z; }
+  const len = Math.hypot(mx,my,mz) || 1;
+  camPos.x += (mx/len)*SPEED*dt;
+  camPos.z += (mz/len)*SPEED*dt;
+
+  // Ground follow: keep camera riding exactly above terrain
+  const groundY = sampleTerrainHeightAtWorld(camPos.x, camPos.z);
+  camPos.y = groundY + EYE_HEIGHT;
+  velY = 0;
+}
+
+/*** ---------- Matrices ---------- ***/
+function perspective(fovy, aspect, near, far){
+  const f = 1/Math.tan(fovy/2), nf = 1/(near-far);
+  return new Float32Array([
+    f/aspect,0,0,0,
+    0,f,0,0,
+    0,0,(far+near)*nf,-1,
+    0,0,(2*far*near)*nf,0
+  ]);
+}
+function lookAt(eye, center, up){
+  const zx = eye.x-center.x, zy = eye.y-center.y, zz = eye.z-center.z;
+  const zl = Math.hypot(zx,zy,zz);
+  const zxN=zx/zl, zyN=zy/zl, zzN=zz/ zl;
+
+  const xx = up.y*zzN - up.z*zyN;
+  const xy = up.z*zxN - up.x*zzN;
+  const xz = up.x*zyN - up.y*zxN;
+  const xl = Math.hypot(xx,xy,xz);
+  const xNx=xx/xl, xNy=xy/xl, xNz=xz/xl;
+
+  const yx = zyN*xNz - zzN*xNy;
+  const yy = zzN*xNx - zxN*xNz;
+  const yz = zxN*xNy - zyN*xNx;
+
+  return new Float32Array([
+    xNx, yx, zxN, 0,
+    xNy, yy, zyN, 0,
+    xNz, yz, zzN, 0,
+    -(xNx*eye.x + xNy*eye.y + xNz*eye.z),
+    -(yx*eye.x + yy*eye.y + yz*eye.z),
+    -(zxN*eye.x + zyN*eye.y + zzN*eye.z),
+    1
+  ]);
+}
+
+/*** ---------- Render Loop ---------- ***/
+let last = performance.now();
+function frame(t){
+  const dt = Math.min(0.033, (t-last)/1000); last = t;
+  tick(dt);
+
+  const aspect = canvas.width / canvas.height;
+  const proj = perspective(60*Math.PI/180, aspect, 0.1, VIEW_FAR);
+  const f = getDir();
+  const center = {x: camPos.x + f.x, y: camPos.y + f.y, z: camPos.z + f.z};
+  const view = lookAt(camPos, center, {x:0,y:1,z:0});
+  const model = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);
+
+  gl.useProgram(prog);
+  gl.uniformMatrix4fv(loc.u_proj,false,proj);
+  gl.uniformMatrix4fv(loc.u_view,false,view);
+  gl.uniformMatrix4fv(loc.u_model,false,model);
+  gl.uniform3f(loc.u_camPos, camPos.x, camPos.y, camPos.z);
+  gl.uniform1f(loc.u_maxDist, LAYER_MAX_DIST);
+  gl.uniform1i(loc.u_layers, LAYERS);
+  gl.uniform2f(loc.u_res, canvas.width, canvas.height);
+  gl.uniform1f(loc.u_time, t*0.001);
+  gl.uniform1f(loc.u_strokePx, STROKE_PX);
+  gl.uniform1f(loc.u_variation, VARIATION);
+  // we will set activeBand per-pass below
+  // Lighting uniforms
+  const lightDir = normalizeVec3([-0.6, -1.0, -0.4]); // coming from above-left
+  gl.uniform3f(loc.u_lightDir, lightDir[0], lightDir[1], lightDir[2]);
+  gl.uniform3f(loc.u_lightColor, 1.0, 1.0, 1.0);
+  gl.uniform1f(loc.u_ambient, 0.35);
+  // Checker uniforms
+  gl.uniform1f(loc.u_checkerSize, CHECKER_SIZE);
+  gl.uniform1f(loc.u_checkerAlpha, CHECKER_ALPHA);
+
+  // 1) Render each band to its texture
+  gl.bindVertexArray(vao);
+  for(let i=0;i<LAYER_PASSES;i++){
+    gl.bindFramebuffer(gl.FRAMEBUFFER, layerFbos[i]);
+    const rw = Math.max(1, Math.floor(canvas.width * RES_SCALE));
+    const rh = Math.max(1, Math.floor(canvas.height * RES_SCALE));
+    gl.viewport(0,0,rw,rh);
+    gl.enable(gl.DEPTH_TEST);
+    gl.clearColor(0.0,0.0,0.0,0.0);
+    gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+    gl.uniform1i(loc.u_activeBand, i);
+    gl.drawElements(gl.TRIANGLES, indexCount, gl.UNSIGNED_INT, 0);
+  }
+
+  // 2) Composite textures to screen as flat layers (nearest on top)
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0,0,canvas.width,canvas.height);
+  gl.disable(gl.DEPTH_TEST);
+  gl.clearColor(0.0,0.0,0.0,1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+
+  drawLayersFullscreen();
+
+  requestAnimationFrame(frame);
+}
+
+// Composite function: draws each band texture as a fullscreen quad back-to-front
+function drawLayersFullscreen(){
+  ensureFullscreenGeom();
+  // Simple throwaway shader for textured quad
+  if(!quadProg){ initQuadProgram(); }
+  gl.useProgram(quadProg);
+  gl.bindVertexArray(fsVao);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 16, 0);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 16, 8);
+  // draw far to near so near band overprints
+  for(let i=LAYER_PASSES-1;i>=0;i--){
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, layerTexs[i]);
+    gl.uniform1i(quadLoc.u_tex, 0);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+}
+
+let quadProg=null, quadLoc=null;
+function initQuadProgram(){
+  const VSQ = `#version 300 es\nlayout(location=0) in vec2 a_pos;\nlayout(location=1) in vec2 a_uv;\nout vec2 v_uv;\nvoid main(){ v_uv = a_uv; gl_Position = vec4(a_pos,0.0,1.0); }`;
+  const FSQ = `#version 300 es\nprecision highp float;\nin vec2 v_uv;\nuniform sampler2D u_tex;\nout vec4 o_color;\nvoid main(){ o_color = texture(u_tex, v_uv); }`;
+  const v = compile(gl.VERTEX_SHADER, VSQ);
+  const f = compile(gl.FRAGMENT_SHADER, FSQ);
+  quadProg = link(v, f);
+  quadLoc = { u_tex: gl.getUniformLocation(quadProg, 'u_tex') };
+}
+
+// small helper since GLSL normalize isn't available in JS
+function normalizeVec3(v){
+  const l = Math.hypot(v[0], v[1], v[2]) || 1;
+  return [v[0]/l, v[1]/l, v[2]/l];
+}
+
+/*** ---------- Boot ---------- ***/
+// Fullscreen quad for compositing
+let fsVao=null, fsVbo=null;
+function ensureFullscreenGeom(){
+  if(fsVao) return;
+  fsVao = gl.createVertexArray();
+  fsVbo = gl.createBuffer();
+  gl.bindVertexArray(fsVao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, fsVbo);
+  const verts = new Float32Array([
+    -1,-1, 0,0,
+     1,-1, 1,0,
+    -1, 1, 0,1,
+     1, 1, 1,1,
+  ]);
+  gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 16, 0);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 16, 8);
+}
+
+function loadImage(url){
+  return new Promise((resolve, reject)=>{
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = ()=>resolve(img);
+    img.onerror = reject;
+    img.src = url;
+  });
+}
+
+(async function(){
+  try{
+    // Load external heightmap image
+    const img = await loadImage(FINAL_DATA_URL);
+    statusEl.textContent = `heightmap loaded: ${img.width}×${img.height} — building terrain…`;
+    buildTerrainFromImage(img);
+    statusEl.textContent = `ready.`;
+    requestAnimationFrame(frame);
+  }catch(e){
+    console.error(e);
+    statusEl.textContent = 'failed to load heightmap';
+  }
+})();
+</script>
+</body>
+</html>
+
