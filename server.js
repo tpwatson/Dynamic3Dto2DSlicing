@@ -14,6 +14,5 @@ app.get('/', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
-  console.log(`🎮 WalkingSimpulator: http://localhost:${PORT}/walkingSimpulator/`);
   console.log(`📁 Static files served from: ${__dirname}`);
 });

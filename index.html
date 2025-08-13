@@ -12,9 +12,11 @@
   #ui .val{display:inline-block;width:70px;text-align:right;font-size:12px;opacity:0.9}
   canvas{display:block;width:100vw;height:100vh}
   .btn{display:inline-block;background:#222;border:1px solid #444;padding:6px 8px;border-radius:6px;cursor:pointer}
+  #uiToggle{position:fixed;left:12px;top:12px;z-index:10}
 </style>
 </head>
 <body>
+<div id="uiToggle" class="btn">Hide UI (H)</div>
 <div id="ui">
   <div><b>Layered Painting</b> — WASD to move, mouse to look. Click canvas to lock cursor.</div>
   <div>Layers: 14 • Stroke size: 8px • 5% random variation</div>
@@ -42,7 +44,7 @@
     <label><input id="ctl_lockLayer" type="checkbox" checked> Lock Layer Max to View Far</label>
   </div>
 </div>
-  <div style="margin-top:8px">
+  <div id="bandUi" style="margin-top:8px">
     <label>Preview Band (isolated)</label>
     <div id="bands"></div>
   </div>
@@ -55,6 +57,8 @@ const HEIGHTMAP_DATA_URL = `heightmap2.png`;
 If you want to use your file instead, e.g. "heightmap.png", put it in same folder and:
 const HEIGHTMAP_DATA_URL = "heightmap.png";
 */
+// Equirectangular sky texture
+const SKYBOX_URL = `skybox1.jpg`;
 
 // Generate a procedural heightmap instead of loading external files
 function generateHeightmap(width, height) {
@@ -113,6 +117,8 @@ const FINAL_DATA_URL = HEIGHTMAP_DATA_URL;
 const GRID = 2048;           // try 128–512
 const SIZE = 5000.0;         // world size (XZ span)
 const HEIGHT_SCALE = 2400.0; // how tall the white peaks get
+// Camera FOV used for both projection and skybox ray reconstruction
+const FOVY = 60 * Math.PI / 180;
 
 // Movement
 const SPEED = 80.0;         // m/s
@@ -123,8 +129,8 @@ const EYE_HEIGHT = 2.0;     // player eye height above terrain
 
 // Painterly / layers
 const LAYERS = 14;
-let VIEW_FAR = 50000.0;          // camera far plane (true view distance)
-let LAYER_MAX_DIST = 1000.0;    // stylization range used for banding/fog
+let VIEW_FAR = 150000.0;          // camera far plane (true view distance)
+let LAYER_MAX_DIST = 5720.0;    // stylization range used for banding
 let STROKE_PX = 2.0;          // base “pixel/brush” size (screen-space)
 let VARIATION = 0.0;         // 5% size variation
 let CHECKER_SIZE = 4.0;      // world units per checker cell
@@ -141,6 +147,8 @@ const recenterBtn = document.getElementById('recenter');
 let gl; // declare before first use (resize() checks this)
 // Forward declare offscreen layer resources so we can init before definitions
 let layerFbos, layerTexs, layerDepth;
+// Skybox resources
+let skyProg = null, skyLoc = null, skyTex = null;
 
 function resize() {
   const dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -169,8 +177,6 @@ const ctlChkAlpha = document.getElementById('ctl_chkAlpha');
 const ctlLayerPasses = document.getElementById('ctl_layerPasses');
 const ctlResScale = document.getElementById('ctl_resScale');
 const ctlLockLayer = document.getElementById('ctl_lockLayer');
-const ctlFogStart = document.getElementById('ctl_fogStart');
-const ctlFogStrength = document.getElementById('ctl_fogStrength');
 const vViewFar = document.getElementById('v_viewFar');
 const vLayerMax = document.getElementById('v_layerMax');
 const vStroke = document.getElementById('v_stroke');
@@ -180,9 +186,19 @@ const vChkSize = document.getElementById('v_chkSize');
 const vChkAlpha = document.getElementById('v_chkAlpha');
 const vLayerPasses = document.getElementById('v_layerPasses');
 const vResScale = document.getElementById('v_resScale');
-const vFogStart = document.getElementById('v_fogStart');
-const vFogStrength = document.getElementById('v_fogStrength');
 const bandsDiv = document.getElementById('bands');
+const uiRoot = document.getElementById('ui');
+const bandUiRoot = document.getElementById('bandUi');
+const uiToggle = document.getElementById('uiToggle');
+let uiHidden = false;
+
+function setUiHidden(v){
+  uiHidden = v;
+  if(uiRoot) uiRoot.style.display = v ? 'none' : '';
+  if(bandUiRoot) bandUiRoot.style.display = v ? 'none' : '';
+  if(uiToggle) uiToggle.textContent = v ? 'Show UI (H)' : 'Hide UI (H)';
+}
+if(uiToggle){ uiToggle.addEventListener('click', ()=> setUiHidden(!uiHidden)); }
 
 function syncUI(){
   ctlViewFar.value = VIEW_FAR;
@@ -195,8 +211,6 @@ function syncUI(){
   ctlLayerPasses.value = LAYER_PASSES;
   ctlResScale.value = RES_SCALE;
   ctlLockLayer.checked = LOCK_LAYER_TO_VIEW;
-    if(ctlFogStart) ctlFogStart.value = FOG_START_FRACTION;
-    if(ctlFogStrength) ctlFogStrength.value = FOG_STRENGTH;
   vViewFar.textContent = VIEW_FAR.toFixed(0);
   vLayerMax.textContent = LAYER_MAX_DIST.toFixed(0);
   vStroke.textContent = STROKE_PX.toFixed(0);
@@ -206,8 +220,6 @@ function syncUI(){
   vChkAlpha.textContent = CHECKER_ALPHA.toFixed(2);
   vLayerPasses.textContent = LAYER_PASSES.toString();
   vResScale.textContent = RES_SCALE.toFixed(2);
-    if(vFogStart) vFogStart.textContent = FOG_START_FRACTION.toFixed(2);
-    if(vFogStrength) vFogStrength.textContent = FOG_STRENGTH.toFixed(2);
 }
 syncUI();
 
@@ -247,12 +259,7 @@ ctlLayerPasses.addEventListener('input', ()=>{ LAYER_PASSES = Math.max(1, Math.m
 ctlResScale.addEventListener('input', ()=>{ RES_SCALE = Number(ctlResScale.value); vResScale.textContent = RES_SCALE.toFixed(2); createLayerTargets(); });
 ctlLockLayer.addEventListener('change', ()=>{ LOCK_LAYER_TO_VIEW = ctlLockLayer.checked; if(LOCK_LAYER_TO_VIEW){ LAYER_MAX_DIST = VIEW_FAR; ctlLayerMax.value = LAYER_MAX_DIST; vLayerMax.textContent = LAYER_MAX_DIST.toFixed(0);} });
 ctlViewFar.addEventListener('input', ()=>{ if(LOCK_LAYER_TO_VIEW){ LAYER_MAX_DIST = VIEW_FAR; ctlLayerMax.value = LAYER_MAX_DIST; vLayerMax.textContent = LAYER_MAX_DIST.toFixed(0);} });
-if(ctlFogStart){
-  ctlFogStart.addEventListener('input', ()=>{ FOG_START_FRACTION = Number(ctlFogStart.value); if(vFogStart) vFogStart.textContent = FOG_START_FRACTION.toFixed(2); });
-}
-if(ctlFogStrength){
-  ctlFogStrength.addEventListener('input', ()=>{ FOG_STRENGTH = Number(ctlFogStrength.value); if(vFogStrength) vFogStrength.textContent = FOG_STRENGTH.toFixed(2); });
-}
+// Fog controls removed
 
 function compile(type,src){
   const s = gl.createShader(type);
@@ -692,7 +699,7 @@ let yaw = 0, pitch = 0;
 let velY = 0;
 
 const keys = {};
-addEventListener('keydown', e=>{ keys[e.key.toLowerCase()] = true; if(e.key==='r'||e.key==='R') recenter(); });
+addEventListener('keydown', e=>{ keys[e.key.toLowerCase()] = true; if(e.key==='r'||e.key==='R') recenter(); if(e.key==='h'||e.key==='H') setUiHidden(!uiHidden); });
 addEventListener('keyup', e=>{ keys[e.key.toLowerCase()] = false; });
 
 function recenter(){
@@ -789,7 +796,7 @@ function frame(t){
   tick(dt);
 
   const aspect = canvas.width / canvas.height;
-  const proj = perspective(60*Math.PI/180, aspect, 0.1, VIEW_FAR);
+  const proj = perspective(FOVY, aspect, 0.1, VIEW_FAR);
   const f = getDir();
   const center = {x: camPos.x + f.x, y: camPos.y + f.y, z: camPos.z + f.z};
   const view = lookAt(camPos, center, {x:0,y:1,z:0});
@@ -836,6 +843,8 @@ function frame(t){
   gl.disable(gl.DEPTH_TEST);
   gl.clearColor(0.0,0.0,0.0,1);
   gl.clear(gl.COLOR_BUFFER_BIT);
+  // Sky as background (drawn first)
+  drawSkyBackground(aspect);
 
   drawLayersFullscreen();
 
@@ -883,6 +892,64 @@ function normalizeVec3(v){
   return [v[0]/l, v[1]/l, v[2]/l];
 }
 
+/*** ---------- Skybox (equirectangular) ---------- ***/
+function initSkyProgram(){
+  if(skyProg) return;
+  const VSQ = `#version 300 es\nlayout(location=0) in vec2 a_pos;\nlayout(location=1) in vec2 a_uv;\nout vec2 v_uv;\nvoid main(){ v_uv = a_uv; gl_Position = vec4(a_pos,0.0,1.0); }`;
+  const FSS = `#version 300 es\nprecision highp float;\n\nin vec2 v_uv;\n\nuniform sampler2D u_sky;\nuniform vec3 u_right;\nuniform vec3 u_up;\nuniform vec3 u_forward;\nuniform float u_aspect;\nuniform float u_tanHalfFovY;\n\nout vec4 o_color;\n\nvoid main(){\n  vec2 ndc = v_uv * 2.0 - 1.0;\n  vec3 dirCam = normalize(vec3(ndc.x * u_aspect * u_tanHalfFovY, ndc.y * u_tanHalfFovY, -1.0));\n  vec3 dirWorld = normalize(u_right * dirCam.x + u_up * dirCam.y + u_forward * dirCam.z);\n  float pi = 3.14159265358979323846;\n  float theta = acos(clamp(dirWorld.y, -1.0, 1.0));\n  float phi = atan(dirWorld.z, dirWorld.x);\n  vec2 uv = vec2(phi / (2.0*pi) + 0.5, theta / pi);\n  vec3 col = texture(u_sky, uv).rgb;\n  o_color = vec4(col, 1.0);\n}`;
+  const v = compile(gl.VERTEX_SHADER, VSQ);
+  const f = compile(gl.FRAGMENT_SHADER, FSS);
+  skyProg = link(v, f);
+  skyLoc = {
+    u_sky: gl.getUniformLocation(skyProg, 'u_sky'),
+    u_right: gl.getUniformLocation(skyProg, 'u_right'),
+    u_up: gl.getUniformLocation(skyProg, 'u_up'),
+    u_forward: gl.getUniformLocation(skyProg, 'u_forward'),
+    u_aspect: gl.getUniformLocation(skyProg, 'u_aspect'),
+    u_tanHalfFovY: gl.getUniformLocation(skyProg, 'u_tanHalfFovY'),
+  };
+}
+
+function createSkyTexture(img){
+  if(skyTex){ gl.deleteTexture(skyTex); skyTex = null; }
+  skyTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, skyTex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+}
+
+function drawSkyBackground(aspect){
+  if(!skyTex) return;
+  ensureFullscreenGeom();
+  initSkyProgram();
+  gl.useProgram(skyProg);
+  gl.bindVertexArray(fsVao);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 16, 0);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 16, 8);
+  const f = getDir();
+  const r = getRight();
+  const upx = r.y*f.z - r.z*f.y;
+  const upy = r.z*f.x - r.x*f.z;
+  const upz = r.x*f.y - r.y*f.x;
+  const fl = Math.hypot(f.x, f.y, f.z) || 1; const rl = Math.hypot(r.x, r.y, r.z) || 1; const ul = Math.hypot(upx, upy, upz) || 1;
+  gl.uniform3f(skyLoc.u_forward, f.x/fl, f.y/fl, f.z/fl);
+  gl.uniform3f(skyLoc.u_right, r.x/rl, r.y/rl, r.z/rl);
+  gl.uniform3f(skyLoc.u_up, upx/ul, upy/ul, upz/ul);
+  gl.uniform1f(skyLoc.u_aspect, aspect);
+  gl.uniform1f(skyLoc.u_tanHalfFovY, Math.tan(FOVY*0.5));
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, skyTex);
+  gl.uniform1i(skyLoc.u_sky, 0);
+  gl.disable(gl.DEPTH_TEST);
+  gl.disable(gl.BLEND);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
 /*** ---------- Boot ---------- ***/
 // Fullscreen quad for compositing
 let fsVao=null, fsVbo=null;
@@ -917,10 +984,15 @@ function loadImage(url){
 
 (async function(){
   try{
-    // Load external heightmap image
-    const img = await loadImage(FINAL_DATA_URL);
+    // Load heightmap and skybox in parallel
+    const [img, skyImg] = await Promise.all([
+      loadImage(FINAL_DATA_URL),
+      loadImage(SKYBOX_URL)
+    ]);
     statusEl.textContent = `heightmap loaded: ${img.width}×${img.height} — building terrain…`;
     buildTerrainFromImage(img);
+    // Setup sky texture
+    createSkyTexture(skyImg);
     statusEl.textContent = `ready.`;
     requestAnimationFrame(frame);
   }catch(e){
