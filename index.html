@@ -17,6 +17,13 @@
   /* Diorama card overlay (GL-drawn) — no DOM element needed */
   /* Black mirror overlay image */
   #mirrorOverlay{position:fixed;left:50%;top:50%;z-index:12;height:100vh;width:auto;pointer-events:none;user-select:none;object-fit:contain;transform:translate(-50%, -50%);} 
+  /* Mobile virtual joysticks */
+  .joy{position:fixed;bottom:22px;width:180px;height:180px;border-radius:50%;background:radial-gradient(closest-side, #ffffff10 0%, #ffffff08 60%, #00000000 61%);border:1px solid #333;display:none;z-index:13;touch-action:none}
+  #joyL{left:22px}
+  #joyR{right:22px}
+  .joy .knob{position:absolute;left:50%;top:50%;width:72px;height:72px;border-radius:50%;background:#ffffff20;border:1px solid #666;transform:translate(-50%, -50%)}
+  .joy.active .knob{background:#ffffff35}
+  @media (hover: none) and (pointer: coarse){ .joy{display:block} }
 </style>
 </head>
 <body>
@@ -54,6 +61,8 @@
   </div>
 <canvas id="gl"></canvas>
 <img id="mirrorOverlay" src="blackmirror.png" alt="" />
+<div id="joyL" class="joy"><div class="knob"></div></div>
+<div id="joyR" class="joy"><div class="knob"></div></div>
 
 <!-- Diorama Card will be drawn by WebGL inside the main canvas; no extra DOM needed -->
 
@@ -134,6 +143,7 @@ const FOVY = 60 * Math.PI / 180;
 // Movement
 const SPEED = 80.0;         // m/s
 const LOOK_SENS = 0.0023;   // mouse
+const KEY_LOOK_SPEED = 1.8; // rad/sec for Arrow keys look
 const JUMP = 8.0;           // simple hop
 const GRAV = 25.0;
 const EYE_HEIGHT = 2.0;     // player eye height above terrain
@@ -566,6 +576,23 @@ function tick(dt){
   if(keys['s']){ mx -= f.x; my -= f.y; mz -= f.z; }
   if(keys['a']){ mx -= r.x; mz -= r.z; }
   if(keys['d']){ mx += r.x; mz += r.z; }
+  // Mobile left joystick: forward/back/strafe
+  if(joyLActive){
+    mx += (f.x* -joyLVec.y) + (r.x* joyLVec.x);
+    mz += (f.z* -joyLVec.y) + (r.z* joyLVec.x);
+  }
+  // Arrow keys for camera look (works well over remote desktop)
+  if(keys['arrowleft']){ yaw -= KEY_LOOK_SPEED * dt; }
+  if(keys['arrowright']){ yaw += KEY_LOOK_SPEED * dt; }
+  if(keys['arrowup']){ pitch -= KEY_LOOK_SPEED * dt; }
+  if(keys['arrowdown']){ pitch += KEY_LOOK_SPEED * dt; }
+  // Mobile right joystick: camera look
+  if(joyRActive){
+    const lookRate = 1.8; // rad/sec at full deflection
+    yaw += joyRVec.x * lookRate * dt;
+    pitch += -joyRVec.y * lookRate * dt;
+  }
+  pitch = Math.max(-1.2, Math.min(1.2, pitch));
   const len = Math.hypot(mx,my,mz) || 1;
   camPos.x += (mx/len)*SPEED*dt;
   camPos.z += (mz/len)*SPEED*dt;
@@ -809,6 +836,42 @@ function loadImage(url){
     statusEl.textContent = 'failed to load heightmap';
   }
 })();
+
+  // ----- Mobile Virtual Joysticks -----
+  const joyL = document.getElementById('joyL');
+  const joyR = document.getElementById('joyR');
+  const knobL = joyL ? joyL.querySelector('.knob') : null;
+  const knobR = joyR ? joyR.querySelector('.knob') : null;
+  let joyLActive=false, joyRActive=false;
+  let joyLVec={x:0,y:0}, joyRVec={x:0,y:0};
+
+  function setupJoystick(root, knob, onVec){
+    if(!root || !knob) return;
+    const radius = 80; // px
+    function updateFromEvent(e){
+      const t = ('touches' in e) ? e.touches[0] : e;
+      const rect = root.getBoundingClientRect();
+      const cx = rect.left + rect.width/2;
+      const cy = rect.top + rect.height/2;
+      let dx = t.clientX - cx;
+      let dy = t.clientY - cy;
+      const len = Math.hypot(dx,dy);
+      const maxLen = radius;
+      const cl = Math.min(1, len/maxLen);
+      if(len>0){ dx = dx/len*cl; dy = dy/len*cl; } else { dx=0; dy=0; }
+      const kx = dx*maxLen, ky = dy*maxLen;
+      knob.style.transform = `translate(${kx}px, ${ky}px)`;
+      onVec({x:dx,y:dy});
+    }
+    function end(){ knob.style.transform='translate(-50%, -50%)'; onVec({x:0,y:0}); root.classList.remove('active'); }
+    root.addEventListener('pointerdown', e=>{ root.setPointerCapture(e.pointerId); root.classList.add('active'); updateFromEvent(e); });
+    root.addEventListener('pointermove', e=>{ if(root.classList.contains('active')) updateFromEvent(e); });
+    root.addEventListener('pointerup', end);
+    root.addEventListener('pointercancel', end);
+  }
+
+  setupJoystick(joyL, knobL, v=>{ joyLVec=v; joyLActive = (v.x!==0||v.y!==0); });
+  setupJoystick(joyR, knobR, v=>{ joyRVec=v; joyRActive = (v.x!==0||v.y!==0); });
 </script>
 </body>
 </html>
