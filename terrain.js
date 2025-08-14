@@ -105,10 +105,19 @@ function buildTerrainFromImage(gl, img, GRID, SIZE, HEIGHT_SCALE){
 
   if(!terrainVbo) terrainVbo = gl.createBuffer();
   if(!terrainIbo) terrainIbo = gl.createBuffer();
+  // Bind into currently bound VAO
   gl.bindBuffer(gl.ARRAY_BUFFER, terrainVbo);
   gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, terrainIbo);
   gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, ind, gl.STATIC_DRAW);
+  // Configure vertex attributes for layout: pos(3), norm(3), col(3)
+  const stride = 36;
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, stride, 0);
+  gl.enableVertexAttribArray(2);
+  gl.vertexAttribPointer(2, 3, gl.FLOAT, false, stride, 12);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(1, 3, gl.FLOAT, false, stride, 24);
 
   terrainHeights = heights;
   terrainW = w; terrainH = h;

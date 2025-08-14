@@ -32,9 +32,10 @@ function initSkyProgram(gl){
   if(skyProg) return;
   const VSQ = `#version 300 es\nlayout(location=0) in vec2 a_pos;\nlayout(location=1) in vec2 a_uv;\nout vec2 v_uv;\nvoid main(){ v_uv = a_uv; gl_Position = vec4(a_pos,0.0,1.0); }`;
   // Note: flip Z in atan to match our -Z forward
-  const FSS = `#version 300 es\nprecision highp float;\n\nin vec2 v_uv;\n\nuniform sampler2D u_sky;\nuniform vec3 u_right;\nuniform vec3 u_up;\nuniform vec3 u_forward;\nuniform float u_aspect;\nuniform float u_tanHalfFovY;\n\nout vec4 o_color;\n\nvoid main(){\n  vec2 ndc = v_uv * 2.0 - 1.0;\n  vec3 dirCam = normalize(vec3(ndc.x * u_aspect * u_tanHalfFovY, ndc.y * u_tanHalfFovY, -1.0));\n  vec3 dirWorld = normalize(u_right * dirCam.x + u_up * dirCam.y + u_forward * dirCam.z);\n  float pi = 3.14159265358979323846;\n  float theta = acos(clamp(dirWorld.y, -1.0, 1.0));
-  float phi = atan(dirWorld.z, -dirWorld.x);
-  vec2 uv = vec2(phi / (2.0*pi) + 0.5, 1.0 - (theta / pi));
+  const FSS = `#version 300 es\nprecision highp float;\n\nin vec2 v_uv;\n\nuniform sampler2D u_sky;\nuniform vec3 u_right;\nuniform vec3 u_up;\nuniform vec3 u_forward;\nuniform float u_aspect;\nuniform float u_tanHalfFovY;\n\nout vec4 o_color;\n\nvoid main(){\n  vec2 ndc = v_uv * 2.0 - 1.0;\n  vec3 dirCam = normalize(vec3(ndc.x * u_aspect * u_tanHalfFovY, ndc.y * u_tanHalfFovY, -1.0));\n  vec3 dirWorld = normalize(u_right * dirCam.x + u_up * dirCam.y + u_forward * dirCam.z);\n  float pi = 3.14159265358979323846;
+  float yaw = atan(dirWorld.z, dirWorld.x);
+  float pitch = asin(clamp(dirWorld.y, -1.0, 1.0));
+  vec2 uv = vec2(yaw / (2.0*pi) + 0.5, 0.5 - (pitch / pi));
   vec3 col = texture(u_sky, uv).rgb;
   o_color = vec4(col, 1.0);
 }`;
