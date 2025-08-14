@@ -11,10 +11,12 @@
   #ui input[type=range]{width:220px;vertical-align:middle}
   #ui .val{display:inline-block;width:70px;text-align:right;font-size:12px;opacity:0.9}
   /* scope fullscreen sizing to primary GL canvas only */
-  #gl{display:block;width:100vw;height:100vh}
+  #gl{display:block;width:100vw;height:100vh;background:#050505}
   .btn{display:inline-block;background:#222;border:1px solid #444;padding:6px 8px;border-radius:6px;cursor:pointer}
   #uiToggle{position:fixed;left:12px;top:12px;z-index:10}
   /* Diorama card overlay (GL-drawn) — no DOM element needed */
+  /* Black mirror overlay image */
+  #mirrorOverlay{position:fixed;left:50%;top:50%;z-index:12;height:100vh;width:auto;pointer-events:none;user-select:none;object-fit:contain;transform:translate(-50%, -50%);} 
 </style>
 </head>
 <body>
@@ -51,6 +53,7 @@
     <div id="bands"></div>
   </div>
 <canvas id="gl"></canvas>
+<img id="mirrorOverlay" src="blackmirror.png" alt="" />
 
 <!-- Diorama Card will be drawn by WebGL inside the main canvas; no extra DOM needed -->
 
@@ -448,9 +451,9 @@ float bandIndex(float d, float maxD, float N){
   // No fog: final color is just painted
   vec3 col = painted;
 
-  // apply mask; to guarantee fill, keep a tiny floor coverage
-  float coverage = max(mask, 0.3);
-  o_color = vec4(mix(paper, col, coverage), 1.0);
+  // apply mask as coverage and alpha so transparent gaps remain between layers
+  float coverage = clamp(mask, 0.0, 1.0);
+  o_color = vec4(mix(paper, col, coverage), coverage);
 }
 `;
 
@@ -672,19 +675,30 @@ function frame(t){
   // Sky as background (drawn first)
   if(typeof drawSkyBackground === 'function') drawSkyBackground(gl, aspect, FOVY, getDir, canvas, SKYBOX_URL);
 
-  if(typeof postDrawLayersFullscreen==='function') postDrawLayersFullscreen(gl, canvas.width, canvas.height, LAYER_PASSES);
+  // Fill background with solid color; skip fullscreen composition
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0,0,canvas.width,canvas.height);
+  gl.disable(gl.DEPTH_TEST);
+  gl.clearColor(0.02,0.02,0.02,1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
 
-  // 3) Draw diorama card overlay in bottom-right (9:16)
+  // 2) Draw diorama exactly under the mirror overlay bounds (clipped), keeping 9:16 via the image sizing
   if(typeof postDrawDioramaCard === 'function'){
     const dpr = Math.min(2, window.devicePixelRatio||1);
-    const cssW = 320; // px in CSS space
-    const margin = 16;
-    const w = Math.floor(cssW * dpr);
-    const h = Math.floor(cssW * (16/9) * dpr);
-    const x = canvas.width - w - Math.floor(margin * dpr);
-    const y = canvas.height - h - Math.floor(margin * dpr);
-    postDrawDioramaCard(gl, canvas.width, canvas.height, LAYER_PASSES, { x, y, w, h, tiltX: cardTiltX, tiltY: cardTiltY, depth: 0.12 });
+    const mirror = document.getElementById('mirrorOverlay');
+    if(mirror){
+      const r = mirror.getBoundingClientRect();
+      const x = Math.max(0, Math.floor(r.left * dpr));
+      const y = Math.max(0, Math.floor(r.top * dpr));
+      const w = Math.max(1, Math.floor(r.width * dpr));
+      const h = Math.max(1, Math.floor(r.height * dpr));
+      postDrawDioramaCard(gl, canvas.width, canvas.height, LAYER_PASSES, { x, y, w, h, tiltX: cardTiltX, tiltY: cardTiltY, depth: 0.12, clip:true });
+    }
   }
+
+  // Sync mirror overlay tilt with card tilt
+  const mirror = document.getElementById('mirrorOverlay');
+  if(mirror){ mirror.style.transform = `translate(-50%, -50%) perspective(800px) rotateX(${(-cardTiltX)}rad) rotateY(${(cardTiltY)}rad)`; }
 
   requestAnimationFrame(frame);
 }
