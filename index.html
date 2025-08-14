@@ -150,7 +150,7 @@ const EYE_HEIGHT = 2.0;     // player eye height above terrain
 
 // Painterly / layers
 const LAYERS = 14;
-let VIEW_FAR = 150000.0;          // camera far plane (true view distance)
+let VIEW_FAR = 1500000.0;          // camera far plane (true view distance)
 let LAYER_MAX_DIST = 14520.0;    // stylization range used for banding
 let STROKE_PX = 2.0;          // base “pixel/brush” size (screen-space)
 let VARIATION = 0.0;         // 5% size variation
@@ -538,19 +538,7 @@ addEventListener('mousemove', e=>{
     yaw += e.movementX * LOOK_SENS;
     pitch += e.movementY * LOOK_SENS;
     pitch = Math.max(-1.2, Math.min(1.2, pitch));
-    // accumulate small tilt from relative mouse deltas
-    cardTiltYTarget += e.movementX * 0.001;
-    cardTiltXTarget += -e.movementY * 0.001;
-  } else {
-    // map cursor position to gentle tilt when not locked
-    const nx = (e.clientX / window.innerWidth) * 2 - 1; // -1..1 left->right
-    const ny = (e.clientY / window.innerHeight) * 2 - 1; // -1..1 top->bottom
-    cardTiltYTarget = nx * 0.25;
-    cardTiltXTarget = -ny * 0.25;
   }
-  // clamp targets
-  cardTiltXTarget = Math.max(-0.45, Math.min(0.45, cardTiltXTarget));
-  cardTiltYTarget = Math.max(-0.45, Math.min(0.45, cardTiltYTarget));
 });
 
 function getDir(){
@@ -644,9 +632,8 @@ let last = performance.now();
 function frame(t){
   const dt = Math.min(0.033, (t-last)/1000); last = t;
   tick(dt);
-  // ease tilt toward target for a smooth feel
-  cardTiltX += (cardTiltXTarget - cardTiltX) * 0.15;
-  cardTiltY += (cardTiltYTarget - cardTiltY) * 0.15;
+  // no diorama tilt
+  cardTiltX = 0; cardTiltY = 0; cardTiltXTarget = 0; cardTiltYTarget = 0;
 
   const aspect = canvas.width / canvas.height;
   const proj = perspective(FOVY, aspect, 0.1, VIEW_FAR);
@@ -719,13 +706,13 @@ function frame(t){
       const y = Math.max(0, Math.floor(r.top * dpr));
       const w = Math.max(1, Math.floor(r.width * dpr));
       const h = Math.max(1, Math.floor(r.height * dpr));
-      postDrawDioramaCard(gl, canvas.width, canvas.height, LAYER_PASSES, { x, y, w, h, tiltX: cardTiltX, tiltY: cardTiltY, depth: 0.0, zSpacing: 260.0, clip:true, maskThreshold: 0.4, activeBand });
+      postDrawDioramaCard(gl, canvas.width, canvas.height, LAYER_PASSES, { x, y, w, h, tiltX: 0.0, tiltY: 0.0, depth: 0.0, zSpacing: 0.0, clip:true, maskThreshold: 0.4, activeBand });
     }
   }
 
   // Sync mirror overlay tilt with card tilt
   const mirror = document.getElementById('mirrorOverlay');
-  if(mirror){ mirror.style.transform = `translate(-50%, -50%) perspective(800px) rotateX(${(-cardTiltX)}rad) rotateY(${(cardTiltY)}rad)`; }
+  if(mirror){ mirror.style.transform = `translate(-50%, -50%)`; }
 
   requestAnimationFrame(frame);
 }

@@ -105,15 +105,7 @@ uniform vec2 u_tilt;     // tiltX (rad, about X), tiltY (rad, about Y)
 
 vec2 project(vec2 local){
   // local in [-0.5,0.5] range
-  vec3 p = vec3(local.x * u_rect.z, -local.y * u_rect.w, u_layerZ);
-  float cx = cos(u_tilt.x), sx = sin(u_tilt.x);
-  float cy = cos(u_tilt.y), sy = sin(u_tilt.y);
-  // rotate around Y then X
-  vec3 ry = vec3(cy*p.x + sy*p.z, p.y, -sy*p.x + cy*p.z);
-  vec3 rx = vec3(ry.x, cx*ry.y - sx*ry.z, sx*ry.y + cx*ry.z);
-  float zCam = 800.0; // pseudo camera distance for perspective
-  float persp = zCam / (zCam - rx.z);
-  vec2 p2 = rx.xy * persp;
+  vec2 p2 = vec2(local.x * u_rect.z, -local.y * u_rect.w);
   vec2 center = vec2(u_rect.x + u_rect.z*0.5, u_rect.y + u_rect.w*0.5);
   vec2 px = center + p2;
   // to NDC
