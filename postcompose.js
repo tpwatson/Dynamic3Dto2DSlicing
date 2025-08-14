@@ -70,7 +70,7 @@ function createLayerTargets(gl, canvasWidth, canvasHeight, layers, resScale){
 
 function bindLayerFbo(gl, i){ gl.bindFramebuffer(gl.FRAMEBUFFER, layerFbos[i]); }
 
-function drawLayersFullscreen(gl, canvasWidth, canvasHeight, passes){
+function drawLayersFullscreen(gl, canvasWidth, canvasHeight, passes, activeBand){
   ensureFullscreenGeomPost(gl); initQuadProgramPost(gl);
   gl.useProgram(quadProgPost);
   gl.bindVertexArray(fsVaoPost);
@@ -80,7 +80,10 @@ function drawLayersFullscreen(gl, canvasWidth, canvasHeight, passes){
   const texelY = 1.0 / (canvasHeight * RES_SCALE_POST);
   gl.uniform2f(quadLocPost.u_texel, texelX, texelY);
   gl.uniform1f(quadLocPost.u_edgePx, 1.5);
-  for(let i=passes-1;i>=0;i--){
+  const only = (typeof activeBand === 'number' && activeBand >= 0 && activeBand < passes) ? activeBand : null;
+  const start = (only===null) ? passes-1 : only;
+  const end = (only===null) ? -1 : only-1;
+  for(let i=start;i> end;i--){
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, layerTexs[i]);
     gl.uniform1i(quadLocPost.u_tex, 0);
@@ -200,7 +203,10 @@ function drawDioramaCard(gl, viewportW, viewportH, passes, opts){
   gl.uniform1f(cardLocPost.u_edgePx, 1.5);
   gl.uniform1f(cardLocPost.u_maskThreshold, (opts && typeof opts.maskThreshold === 'number') ? opts.maskThreshold : 0.5);
   const zSpacing = (opts && typeof opts.zSpacing === 'number') ? opts.zSpacing : 220.0;
-  for(let i=passes-1;i>=0;i--){
+  const only = (opts && typeof opts.activeBand === 'number' && opts.activeBand >= 0 && opts.activeBand < passes) ? opts.activeBand : null;
+  const start = (only===null) ? passes-1 : only;
+  const end = (only===null) ? -1 : only-1;
+  for(let i=start;i> end;i--){
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, layerTexs[i]);
     gl.uniform1i(cardLocPost.u_tex, 0);

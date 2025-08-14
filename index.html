@@ -681,14 +681,14 @@ function frame(t){
   // Bind terrain buffers from terrain module (vbo/ibo already filled)
   if(typeof bindTerrainBuffers==='function') bindTerrainBuffers(gl);
   for(let i=0;i<LAYER_PASSES;i++){
-    if(typeof postBindLayerFbo==='function') postBindLayerFbo(gl, i);
+  if(typeof postBindLayerFbo==='function') postBindLayerFbo(gl, i);
     const rw = Math.max(1, Math.floor(canvas.width * RES_SCALE));
     const rh = Math.max(1, Math.floor(canvas.height * RES_SCALE));
     gl.viewport(0,0,rw,rh);
     gl.enable(gl.DEPTH_TEST);
     gl.clearColor(0.0,0.0,0.0,0.0);
     gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
-    gl.uniform1i(loc.u_activeBand, i);
+  gl.uniform1i(loc.u_activeBand, (activeBand>=0) ? activeBand : i);
     const terrainIndexCount = (typeof getTerrainIndexCount==='function') ? getTerrainIndexCount() : indexCount;
     gl.drawElements(gl.TRIANGLES, terrainIndexCount, gl.UNSIGNED_INT, 0);
   }
@@ -719,7 +719,7 @@ function frame(t){
       const y = Math.max(0, Math.floor(r.top * dpr));
       const w = Math.max(1, Math.floor(r.width * dpr));
       const h = Math.max(1, Math.floor(r.height * dpr));
-      postDrawDioramaCard(gl, canvas.width, canvas.height, LAYER_PASSES, { x, y, w, h, tiltX: cardTiltX, tiltY: cardTiltY, depth: 0.0, zSpacing: 260.0, clip:true, maskThreshold: 0.4 });
+      postDrawDioramaCard(gl, canvas.width, canvas.height, LAYER_PASSES, { x, y, w, h, tiltX: cardTiltX, tiltY: cardTiltY, depth: 0.0, zSpacing: 260.0, clip:true, maskThreshold: 0.4, activeBand });
     }
   }
 
@@ -860,18 +860,39 @@ function loadImage(url){
       const cl = Math.min(1, len/maxLen);
       if(len>0){ dx = dx/len*cl; dy = dy/len*cl; } else { dx=0; dy=0; }
       const kx = dx*maxLen, ky = dy*maxLen;
-      knob.style.transform = `translate(${kx}px, ${ky}px)`;
+      knob.style.transform = `translate(calc(-50% + ${kx}px), calc(-50% + ${ky}px))`;
       onVec({x:dx,y:dy});
     }
     function end(){ knob.style.transform='translate(-50%, -50%)'; onVec({x:0,y:0}); root.classList.remove('active'); }
-    root.addEventListener('pointerdown', e=>{ root.setPointerCapture(e.pointerId); root.classList.add('active'); updateFromEvent(e); });
-    root.addEventListener('pointermove', e=>{ if(root.classList.contains('active')) updateFromEvent(e); });
-    root.addEventListener('pointerup', end);
-    root.addEventListener('pointercancel', end);
+    if(window.PointerEvent){
+      root.addEventListener('pointerdown', e=>{ root.setPointerCapture(e.pointerId); root.classList.add('active'); updateFromEvent(e); });
+      root.addEventListener('pointermove', e=>{ if(root.classList.contains('active')) updateFromEvent(e); });
+      root.addEventListener('pointerup', end);
+      root.addEventListener('pointercancel', end);
+    } else {
+      root.addEventListener('touchstart', e=>{ root.classList.add('active'); updateFromEvent(e); e.preventDefault(); }, {passive:false});
+      root.addEventListener('touchmove', e=>{ if(root.classList.contains('active')) updateFromEvent(e); e.preventDefault(); }, {passive:false});
+      root.addEventListener('touchend', end, {passive:false});
+      root.addEventListener('touchcancel', end, {passive:false});
+    }
   }
 
   setupJoystick(joyL, knobL, v=>{ joyLVec=v; joyLActive = (v.x!==0||v.y!==0); });
   setupJoystick(joyR, knobR, v=>{ joyRVec=v; joyRActive = (v.x!==0||v.y!==0); });
+
+  function isTouchLike(){
+    const coarse = window.matchMedia ? window.matchMedia('(pointer: coarse)').matches : false;
+    return coarse || ('ontouchstart' in window) || (navigator.maxTouchPoints && navigator.maxTouchPoints>0);
+  }
+  function ensureJoystickVisibility(){
+    if(!joyL||!joyR) return;
+    if(isTouchLike()){
+      joyL.style.display = 'block';
+      joyR.style.display = 'block';
+    }
+  }
+  ensureJoystickVisibility();
+  addEventListener('resize', ensureJoystickVisibility);
 </script>
 </body>
 </html>
