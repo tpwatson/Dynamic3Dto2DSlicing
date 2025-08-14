@@ -10,9 +10,11 @@
   #ui label{display:block;font-size:12px;margin:6px 0 2px}
   #ui input[type=range]{width:220px;vertical-align:middle}
   #ui .val{display:inline-block;width:70px;text-align:right;font-size:12px;opacity:0.9}
-  canvas{display:block;width:100vw;height:100vh}
+  /* scope fullscreen sizing to primary GL canvas only */
+  #gl{display:block;width:100vw;height:100vh}
   .btn{display:inline-block;background:#222;border:1px solid #444;padding:6px 8px;border-radius:6px;cursor:pointer}
   #uiToggle{position:fixed;left:12px;top:12px;z-index:10}
+  /* Diorama card overlay (GL-drawn) — no DOM element needed */
 </style>
 </head>
 <body>
@@ -49,6 +51,8 @@
     <div id="bands"></div>
   </div>
 <canvas id="gl"></canvas>
+
+<!-- Diorama Card will be drawn by WebGL inside the main canvas; no extra DOM needed -->
 
 <script src="skybox.js"></script>
 <script src="terrain.js"></script>
@@ -498,6 +502,9 @@ let activeBand = -1; // -1 = all
 let camPos = {x:0, y:30, z:-SIZE*0.9};
 let yaw = 0, pitch = 0;
 let velY = 0;
+// Diorama card tilt (radians)
+let cardTiltX = 0, cardTiltY = 0;
+let cardTiltXTarget = 0, cardTiltYTarget = 0;
 
 const keys = {};
 addEventListener('keydown', e=>{ keys[e.key.toLowerCase()] = true; if(e.key==='r'||e.key==='R') recenter(); if(e.key==='h'||e.key==='H') setUiHidden(!uiHidden); });
@@ -518,7 +525,19 @@ addEventListener('mousemove', e=>{
     yaw += e.movementX * LOOK_SENS;
     pitch += e.movementY * LOOK_SENS;
     pitch = Math.max(-1.2, Math.min(1.2, pitch));
+    // accumulate small tilt from relative mouse deltas
+    cardTiltYTarget += e.movementX * 0.001;
+    cardTiltXTarget += -e.movementY * 0.001;
+  } else {
+    // map cursor position to gentle tilt when not locked
+    const nx = (e.clientX / window.innerWidth) * 2 - 1; // -1..1 left->right
+    const ny = (e.clientY / window.innerHeight) * 2 - 1; // -1..1 top->bottom
+    cardTiltYTarget = nx * 0.25;
+    cardTiltXTarget = -ny * 0.25;
   }
+  // clamp targets
+  cardTiltXTarget = Math.max(-0.45, Math.min(0.45, cardTiltXTarget));
+  cardTiltYTarget = Math.max(-0.45, Math.min(0.45, cardTiltYTarget));
 });
 
 function getDir(){
@@ -595,6 +614,9 @@ let last = performance.now();
 function frame(t){
   const dt = Math.min(0.033, (t-last)/1000); last = t;
   tick(dt);
+  // ease tilt toward target for a smooth feel
+  cardTiltX += (cardTiltXTarget - cardTiltX) * 0.15;
+  cardTiltY += (cardTiltYTarget - cardTiltY) * 0.15;
 
   const aspect = canvas.width / canvas.height;
   const proj = perspective(FOVY, aspect, 0.1, VIEW_FAR);
@@ -651,6 +673,18 @@ function frame(t){
   if(typeof drawSkyBackground === 'function') drawSkyBackground(gl, aspect, FOVY, getDir, canvas, SKYBOX_URL);
 
   if(typeof postDrawLayersFullscreen==='function') postDrawLayersFullscreen(gl, canvas.width, canvas.height, LAYER_PASSES);
+
+  // 3) Draw diorama card overlay in bottom-right (9:16)
+  if(typeof postDrawDioramaCard === 'function'){
+    const dpr = Math.min(2, window.devicePixelRatio||1);
+    const cssW = 320; // px in CSS space
+    const margin = 16;
+    const w = Math.floor(cssW * dpr);
+    const h = Math.floor(cssW * (16/9) * dpr);
+    const x = canvas.width - w - Math.floor(margin * dpr);
+    const y = canvas.height - h - Math.floor(margin * dpr);
+    postDrawDioramaCard(gl, canvas.width, canvas.height, LAYER_PASSES, { x, y, w, h, tiltX: cardTiltX, tiltY: cardTiltY, depth: 0.12 });
+  }
 
   requestAnimationFrame(frame);
 }

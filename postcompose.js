@@ -5,6 +5,7 @@ let RES_SCALE_POST = 1.0;
 let LAYERS_POST = 1;
 
 let quadProgPost = null, quadLocPost = null, fsVaoPost = null, fsVboPost = null;
+let cardProgPost = null, cardLocPost = null;
 
 function ensureFullscreenGeomPost(gl){
   if(fsVaoPost) return;
@@ -83,9 +84,95 @@ function drawLayersFullscreen(gl, canvasWidth, canvasHeight, passes){
   gl.disable(gl.BLEND);
 }
 
+function initCardProgramPost(gl){
+  if(cardProgPost) return;
+  const VS = `#version 300 es
+layout(location=0) in vec2 a_pos;
+layout(location=1) in vec2 a_uv;
+out vec2 v_uv;
+uniform vec2 u_viewport; // pixels
+uniform vec4 u_rect;     // x,y,w,h in pixels
+uniform vec2 u_tilt;     // tiltX (rad, about X), tiltY (rad, about Y)
+
+vec2 project(vec2 local){
+  // local in [-0.5,0.5] range
+  vec3 p = vec3(local.x * u_rect.z, local.y * u_rect.w, 0.0);
+  float cx = cos(u_tilt.x), sx = sin(u_tilt.x);
+  float cy = cos(u_tilt.y), sy = sin(u_tilt.y);
+  // rotate around Y then X
+  vec3 ry = vec3(cy*p.x + sy*p.z, p.y, -sy*p.x + cy*p.z);
+  vec3 rx = vec3(ry.x, cx*ry.y - sx*ry.z, sx*ry.y + cx*ry.z);
+  float zCam = 800.0; // pseudo camera distance for perspective
+  float persp = zCam / (zCam - rx.z);
+  vec2 p2 = rx.xy * persp;
+  vec2 center = vec2(u_rect.x + u_rect.z*0.5, u_rect.y + u_rect.w*0.5);
+  vec2 px = center + p2;
+  // to NDC
+  vec2 ndc = vec2((px.x / u_viewport.x) * 2.0 - 1.0, 1.0 - (px.y / u_viewport.y) * 2.0);
+  return ndc;
+}
+
+void main(){
+  v_uv = a_uv;
+  vec2 local = a_pos * 0.5; // [-1,1] -> [-0.5,0.5]
+  vec2 ndc = project(local);
+  gl_Position = vec4(ndc, 0.0, 1.0);
+}`;
+
+  const FS = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_tex;
+uniform vec2 u_uvOffset; // parallax offset in UV space
+out vec4 o_color;
+void main(){
+  vec2 uv = v_uv + u_uvOffset;
+  o_color = texture(u_tex, uv);
+}`;
+
+  const v = compilePost(gl, gl.VERTEX_SHADER, VS);
+  const f = compilePost(gl, gl.FRAGMENT_SHADER, FS);
+  cardProgPost = linkPost(gl, v, f);
+  cardLocPost = {
+    u_tex: gl.getUniformLocation(cardProgPost, 'u_tex'),
+    u_viewport: gl.getUniformLocation(cardProgPost, 'u_viewport'),
+    u_rect: gl.getUniformLocation(cardProgPost, 'u_rect'),
+    u_tilt: gl.getUniformLocation(cardProgPost, 'u_tilt'),
+    u_uvOffset: gl.getUniformLocation(cardProgPost, 'u_uvOffset'),
+  };
+}
+
+function drawDioramaCard(gl, viewportW, viewportH, passes, opts){
+  if(!layerTexs) return;
+  ensureFullscreenGeomPost(gl); initCardProgramPost(gl);
+  gl.useProgram(cardProgPost);
+  gl.bindVertexArray(fsVaoPost);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+  gl.uniform2f(cardLocPost.u_viewport, viewportW, viewportH);
+  gl.uniform4f(cardLocPost.u_rect, opts.x|0, opts.y|0, Math.max(1, opts.w|0), Math.max(1, opts.h|0));
+  gl.uniform2f(cardLocPost.u_tilt, opts.tiltX||0, opts.tiltY||0);
+
+  const depth = opts.depth || 0.12; // UV parallax scale
+  for(let i=passes-1;i>=0;i--){
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, layerTexs[i]);
+    gl.uniform1i(cardLocPost.u_tex, 0);
+    const t = passes<=1 ? 0.0 : (i/(passes-1)); // 0..1 far->near
+    const dz = (t - 0.5) * 2.0; // -1..1 centered
+    const offX = -(opts.tiltY||0) * depth * dz;
+    const offY =  (opts.tiltX||0) * depth * dz;
+    gl.uniform2f(cardLocPost.u_uvOffset, offX, offY);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+  gl.disable(gl.BLEND);
+}
+
 // Export API
 window.postCreateLayerTargets = createLayerTargets;
 window.postBindLayerFbo = bindLayerFbo;
 window.postDrawLayersFullscreen = drawLayersFullscreen;
+window.postDrawDioramaCard = drawDioramaCard;
 
 
