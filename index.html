@@ -117,8 +117,8 @@ function generateHeightmap(width, height) {
 // Use external heightmap image provided by user
 const FINAL_DATA_URL = HEIGHTMAP_DATA_URL;
 
-// Terrain resolution (vertices per side)
-const GRID = 2048;           // try 128–512
+  // Terrain resolution (vertices per side)
+  const GRID = 512;           // try 128–512
 const SIZE = 5000.0;         // world size (XZ span)
 const HEIGHT_SCALE = 2400.0; // how tall the white peaks get
 // Camera FOV used for both projection and skybox ray reconstruction
@@ -134,12 +134,12 @@ const EYE_HEIGHT = 2.0;     // player eye height above terrain
 // Painterly / layers
 const LAYERS = 14;
 let VIEW_FAR = 150000.0;          // camera far plane (true view distance)
-let LAYER_MAX_DIST = 5720.0;    // stylization range used for banding
+let LAYER_MAX_DIST = 14520.0;    // stylization range used for banding
 let STROKE_PX = 2.0;          // base “pixel/brush” size (screen-space)
 let VARIATION = 0.0;         // 5% size variation
 let CHECKER_SIZE = 4.0;      // world units per checker cell
 let CHECKER_ALPHA = 0.04;      // overlay opacity (0..1)
-let LAYER_PASSES = 14;         // how many bands to render (near-first)
+  let LAYER_PASSES = 10;         // how many bands to render (near-first)
 let RES_SCALE = 0.25;           // 1.0 = full res, <1 = render to smaller FBOs
 let LOCK_LAYER_TO_VIEW = true; // keep LAYER_MAX_DIST tracking VIEW_FAR
 
@@ -162,8 +162,16 @@ function resize() {
 }
 resize(); addEventListener('resize', resize);
 
-gl = canvas.getContext('webgl2', {antialias:false, alpha:false});
+gl = canvas.getContext('webgl2', {antialias:false, alpha:false, powerPreference:'high-performance'});
 if(!gl){ alert('WebGL2 required'); throw new Error('No WebGL2'); }
+// Show GPU/driver info to help diagnose perf differences
+try{
+  const ext = gl.getExtension('WEBGL_debug_renderer_info');
+  const renderer = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : 'unknown';
+  const vendor = ext ? gl.getParameter(ext.UNMASKED_VENDOR_WEBGL) : 'unknown';
+  const dprInfo = Math.min(2, window.devicePixelRatio || 1);
+  if(statusEl) statusEl.textContent = `GPU: ${renderer} (${vendor}) — DPR: ${dprInfo} — loading heightmap…`;
+}catch(e){ /* ignore */ }
 // Initialize layer targets once GL exists
 if(typeof postCreateLayerTargets==='function') postCreateLayerTargets(gl, canvas.width, canvas.height, LAYERS, RES_SCALE);
 
@@ -367,9 +375,9 @@ float bandIndex(float d, float maxD, float N){
   return clamp(idx, 0.0, N - 1.0);
 }
 
-void main(){
-  // distance from camera in view space (positive forward)
-  float d = v_eyeZ;
+  void main(){
+  // distance from camera in world space (rotation-invariant)
+  float d = distance(v_world, u_camPos);
   float idx = bandIndex(d, u_maxDist, float(u_layers));
 
   // Band mask: when u_activeBand >= 0, only draw that band
