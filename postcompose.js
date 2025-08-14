@@ -7,6 +7,8 @@ let LAYERS_POST = 1;
 let quadProgPost = null, quadLocPost = null, fsVaoPost = null, fsVboPost = null;
 let cardProgPost = null, cardLocPost = null;
 let maskTexPost = null;
+let FROZEN_START_BAND = -1; // -1 = disabled; >=0 means bands [start..] are frozen (render once)
+let frozenValid = null;     // boolean per band when frozen
 
 function ensureFullscreenGeomPost(gl){
   if(fsVaoPost) return;
@@ -45,6 +47,7 @@ function createLayerTargets(gl, canvasWidth, canvasHeight, layers, resScale){
   if(!layerFbos) layerFbos = new Array(layers);
   if(!layerTexs) layerTexs = new Array(layers);
   if(!layerDepth) layerDepth = new Array(layers);
+  frozenValid = new Array(layers).fill(false);
   for(let i=0;i<layers;i++){
     if(layerTexs[i]){ gl.deleteTexture(layerTexs[i]); layerTexs[i]=null; }
     if(layerDepth[i]){ gl.deleteRenderbuffer(layerDepth[i]); layerDepth[i]=null; }
@@ -238,5 +241,11 @@ window.postBindLayerFbo = bindLayerFbo;
 window.postDrawLayersFullscreen = drawLayersFullscreen;
 window.postDrawDioramaCard = drawDioramaCard;
 window.postSetMirrorMaskTexture = setMirrorMaskTexture;
+window.postSetFrozenStartBand = function(start){ FROZEN_START_BAND = (typeof start==='number') ? start|0 : -1; };
+window.postShouldRenderBand = function(i){
+  if(FROZEN_START_BAND >= 0 && i >= FROZEN_START_BAND){ return !frozenValid || !frozenValid[i]; }
+  return true;
+};
+window.postMarkBandRendered = function(i){ if(FROZEN_START_BAND >= 0 && i >= FROZEN_START_BAND && frozenValid){ frozenValid[i] = true; } };
 
 

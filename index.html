@@ -136,7 +136,7 @@ const FINAL_DATA_URL = HEIGHTMAP_DATA_URL;
   // Terrain resolution (vertices per side)
   const GRID = 512;           // try 128–512
 const SIZE = 5000.0;         // world size (XZ span)
-const HEIGHT_SCALE = 2400.0; // how tall the white peaks get
+const HEIGHT_SCALE = 240.0; // how tall the white peaks get
 // Camera FOV used for both projection and skybox ray reconstruction
 const FOVY = 60 * Math.PI / 180;
 
@@ -147,6 +147,9 @@ const KEY_LOOK_SPEED = 1.8; // rad/sec for Arrow keys look
 const JUMP = 8.0;           // simple hop
 const GRAV = 25.0;
 const EYE_HEIGHT = 2.0;     // player eye height above terrain
+// Frame rate cap (testing)
+const FPS_CAP_ENABLED = true;
+const FPS_CAP = 30; // target FPS when cap is enabled
 // Sprint/stamina (sedentary baseline)
 const SPRINT_SPEED_TOP = 60.0;   // m/s for first ~5s
 const SPRINT_SPEED_LONG = 50.0;  // m/s for next ~20-30s
@@ -303,6 +306,17 @@ ctlResScale.addEventListener('input', ()=>{ RES_SCALE = Number(ctlResScale.value
 ctlLockLayer.addEventListener('change', ()=>{ LOCK_LAYER_TO_VIEW = ctlLockLayer.checked; if(LOCK_LAYER_TO_VIEW){ LAYER_MAX_DIST = VIEW_FAR; ctlLayerMax.value = LAYER_MAX_DIST; vLayerMax.textContent = LAYER_MAX_DIST.toFixed(0);} });
 ctlViewFar.addEventListener('input', ()=>{ if(LOCK_LAYER_TO_VIEW){ LAYER_MAX_DIST = VIEW_FAR; ctlLayerMax.value = LAYER_MAX_DIST; vLayerMax.textContent = LAYER_MAX_DIST.toFixed(0);} });
 // Fog controls removed
+
+  // Freeze background toggle and start band selector (UI minimal: buttons)
+  const freezeBtn = document.createElement('span'); freezeBtn.className='btn'; freezeBtn.style.marginLeft='6px'; freezeBtn.textContent='Freeze BG';
+  const freezeBandInc = document.createElement('span'); freezeBandInc.className='btn'; freezeBandInc.style.marginLeft='6px'; freezeBandInc.textContent='BG Start++';
+  const freezeBandDec = document.createElement('span'); freezeBandDec.className='btn'; freezeBandDec.style.marginLeft='6px'; freezeBandDec.textContent='BG Start--';
+  uiRoot.appendChild(freezeBtn); uiRoot.appendChild(freezeBandDec); uiRoot.appendChild(freezeBandInc);
+  let frozenStart = -1;
+  function applyFrozen(){ if(typeof postSetFrozenStartBand==='function') postSetFrozenStartBand(frozenStart); }
+  freezeBtn.onclick = ()=>{ frozenStart = (frozenStart<0) ? 10 : -1; applyFrozen(); };
+  freezeBandInc.onclick = ()=>{ if(frozenStart<LAYERS-1){ frozenStart++; applyFrozen(); } };
+  freezeBandDec.onclick = ()=>{ if(frozenStart>-1){ frozenStart--; applyFrozen(); } };
 
 function compile(type,src){
   const s = gl.createShader(type);
@@ -681,7 +695,14 @@ function lookAt(eye, center, up){
 
 /*** ---------- Render Loop ---------- ***/
 let last = performance.now();
+let lastFrameTime = 0;
 function frame(t){
+  // FPS cap: skip frames to meet target cadence
+  if(FPS_CAP_ENABLED){
+    const minDelta = 1000 / FPS_CAP;
+    if(t - lastFrameTime < minDelta){ requestAnimationFrame(frame); return; }
+    lastFrameTime = t;
+  }
   const dt = Math.min(0.033, (t-last)/1000); last = t;
   tick(dt);
   updateStatus();
@@ -728,6 +749,11 @@ function frame(t){
     const rh = Math.max(1, Math.floor(canvas.height * RES_SCALE));
     gl.viewport(0,0,rw,rh);
     gl.enable(gl.DEPTH_TEST);
+    // If this band is frozen and already captured, do not clear or redraw
+    const shouldRender = (typeof postShouldRenderBand==='function') ? postShouldRenderBand(bandIndexToRender) : true;
+    if(!shouldRender){
+      continue;
+    }
     gl.clearColor(0.0,0.0,0.0,0.0);
     gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
     gl.uniform1i(loc.u_activeBand, bandIndexToRender);
@@ -750,6 +776,7 @@ function frame(t){
     }
     // restore identity model for subsequent logic
     gl.uniformMatrix4fv(loc.u_model,false,model);
+    if(typeof postMarkBandRendered==='function') postMarkBandRendered(bandIndexToRender);
   }
 
   // 2) Composite textures to screen as flat layers (nearest on top)
