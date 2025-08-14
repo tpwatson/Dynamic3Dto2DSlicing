@@ -716,7 +716,7 @@ function frame(t){
   gl.uniform1f(loc.u_checkerSize, CHECKER_SIZE);
   gl.uniform1f(loc.u_checkerAlpha, CHECKER_ALPHA);
 
-  // 1) Render each band to its texture
+  // 1) Render each band to its texture (draw multiple wrapped tiles in a 3x3 grid)
   gl.bindVertexArray(vao);
   // Bind terrain buffers from terrain module (vbo/ibo already filled)
   if(typeof bindTerrainBuffers==='function') bindTerrainBuffers(gl);
@@ -730,7 +730,24 @@ function frame(t){
     gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
   gl.uniform1i(loc.u_activeBand, (activeBand>=0) ? activeBand : i);
     const terrainIndexCount = (typeof getTerrainIndexCount==='function') ? getTerrainIndexCount() : indexCount;
-    gl.drawElements(gl.TRIANGLES, terrainIndexCount, gl.UNSIGNED_INT, 0);
+    // draw 3x3 tiles around camera by translating model matrix
+    const translations = [-1,0,1];
+    for(let ox of translations){
+      for(let oz of translations){
+        const tx = ox * SIZE * 2.0;
+        const tz = oz * SIZE * 2.0;
+        const modelT = new Float32Array([
+          1,0,0,0,
+          0,1,0,0,
+          0,0,1,0,
+          tx,0,tz,1
+        ]);
+        gl.uniformMatrix4fv(loc.u_model,false,modelT);
+        gl.drawElements(gl.TRIANGLES, terrainIndexCount, gl.UNSIGNED_INT, 0);
+      }
+    }
+    // restore identity model for subsequent logic
+    gl.uniformMatrix4fv(loc.u_model,false,model);
   }
 
   // 2) Composite textures to screen as flat layers (nearest on top)

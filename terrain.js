@@ -13,8 +13,13 @@ function bindTerrainBuffers(gl){
 }
 function sampleTerrainHeightAtWorldImpl(wx, wz, SIZE){
   if(!terrainHeights) return 0.0;
-  const u = (wx / (SIZE*2.0) + 0.5) * (terrainW - 1);
-  const v = (wz / (SIZE*2.0) + 0.5) * (terrainH - 1);
+  // Wrap world coordinates into the base tile [-SIZE, SIZE)
+  const span = SIZE * 2.0;
+  const wrap = (p)=>{ let t = ((p + SIZE) % span); if(t < 0) t += span; return t - SIZE; };
+  const wxWrapped = wrap(wx);
+  const wzWrapped = wrap(wz);
+  const u = (wxWrapped / span + 0.5) * (terrainW - 1);
+  const v = (wzWrapped / span + 0.5) * (terrainH - 1);
   const i0 = Math.max(0, Math.min(terrainW-1, Math.floor(u)));
   const j0 = Math.max(0, Math.min(terrainH-1, Math.floor(v)));
   const i1 = Math.min(terrainW-1, i0+1);
