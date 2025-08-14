@@ -160,13 +160,13 @@ const STAMINA_RECOVER_MOVE = 1.0 / 90.0;  // full recover in ~90s if walking
 
 // Painterly / layers
 const LAYERS = 14;
-let VIEW_FAR = 1500000.0;          // camera far plane (true view distance)
-let LAYER_MAX_DIST = 14520.0;    // stylization range used for banding
+let VIEW_FAR = 13520.0;          // camera far plane (true view distance)
+let LAYER_MAX_DIST = 3860.0;    // stylization range used for banding
 let STROKE_PX = 2.0;          // base “pixel/brush” size (screen-space)
 let VARIATION = 0.0;         // 5% size variation
 let CHECKER_SIZE = 4.0;      // world units per checker cell
 let CHECKER_ALPHA = 0.04;      // overlay opacity (0..1)
-  let LAYER_PASSES = 10;         // how many bands to render (near-first)
+  let LAYER_PASSES = 14;         // how many bands to render (near-first)
 let RES_SCALE = 0.25;           // 1.0 = full res, <1 = render to smaller FBOs
 let LOCK_LAYER_TO_VIEW = true; // keep LAYER_MAX_DIST tracking VIEW_FAR
 
@@ -720,15 +720,17 @@ function frame(t){
   gl.bindVertexArray(vao);
   // Bind terrain buffers from terrain module (vbo/ibo already filled)
   if(typeof bindTerrainBuffers==='function') bindTerrainBuffers(gl);
-  for(let i=0;i<LAYER_PASSES;i++){
-  if(typeof postBindLayerFbo==='function') postBindLayerFbo(gl, i);
+  const passesToRender = (activeBand>=0) ? 1 : LAYERS;
+  for(let p=0;p<passesToRender;p++){
+    const bandIndexToRender = (activeBand>=0) ? activeBand : p;
+    if(typeof postBindLayerFbo==='function') postBindLayerFbo(gl, bandIndexToRender);
     const rw = Math.max(1, Math.floor(canvas.width * RES_SCALE));
     const rh = Math.max(1, Math.floor(canvas.height * RES_SCALE));
     gl.viewport(0,0,rw,rh);
     gl.enable(gl.DEPTH_TEST);
     gl.clearColor(0.0,0.0,0.0,0.0);
     gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
-  gl.uniform1i(loc.u_activeBand, (activeBand>=0) ? activeBand : i);
+    gl.uniform1i(loc.u_activeBand, bandIndexToRender);
     const terrainIndexCount = (typeof getTerrainIndexCount==='function') ? getTerrainIndexCount() : indexCount;
     // draw 3x3 tiles around camera by translating model matrix
     const translations = [-1,0,1];
@@ -776,7 +778,7 @@ function frame(t){
       const y = Math.max(0, Math.floor(r.top * dpr));
       const w = Math.max(1, Math.floor(r.width * dpr));
       const h = Math.max(1, Math.floor(r.height * dpr));
-      postDrawDioramaCard(gl, canvas.width, canvas.height, LAYER_PASSES, { x, y, w, h, tiltX: 0.0, tiltY: 0.0, depth: 0.0, zSpacing: 0.0, clip:true, maskThreshold: 0.4, activeBand });
+      postDrawDioramaCard(gl, canvas.width, canvas.height, LAYERS, { x, y, w, h, tiltX: 0.0, tiltY: 0.0, depth: 0.0, zSpacing: 0.0, clip:true, maskThreshold: 0.4, activeBand });
     }
   }
 
