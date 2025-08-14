@@ -692,7 +692,7 @@ function frame(t){
       const y = Math.max(0, Math.floor(r.top * dpr));
       const w = Math.max(1, Math.floor(r.width * dpr));
       const h = Math.max(1, Math.floor(r.height * dpr));
-      postDrawDioramaCard(gl, canvas.width, canvas.height, LAYER_PASSES, { x, y, w, h, tiltX: cardTiltX, tiltY: cardTiltY, depth: 0.12, clip:true });
+      postDrawDioramaCard(gl, canvas.width, canvas.height, LAYER_PASSES, { x, y, w, h, tiltX: cardTiltX, tiltY: cardTiltY, depth: 0.0, zSpacing: 260.0, clip:true, maskThreshold: 0.4 });
     }
   }
 
@@ -788,9 +788,10 @@ function loadImage(url){
 (async function(){
   try{
     // Load heightmap and skybox in parallel
-    const [img, skyImg] = await Promise.all([
+    const [img, skyImg, maskImg] = await Promise.all([
       loadImage(FINAL_DATA_URL),
-      loadImage(SKYBOX_URL)
+      loadImage(SKYBOX_URL),
+      loadImage('blackmirror.png')
     ]);
     statusEl.textContent = `heightmap loaded: ${img.width}×${img.height} — building terrain…`;
     if(typeof buildTerrainFromImage === 'function'){
@@ -799,6 +800,8 @@ function loadImage(url){
     }
     // Setup sky texture (via skybox.js if available)
     if(typeof createSkyTexture === 'function') createSkyTexture(gl, skyImg);
+    // Provide alpha mask texture for card clipping
+    if(typeof postSetMirrorMaskTexture === 'function') postSetMirrorMaskTexture(gl, maskImg);
     statusEl.textContent = `ready.`;
     requestAnimationFrame(frame);
   }catch(e){
