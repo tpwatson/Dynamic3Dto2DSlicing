@@ -50,6 +50,10 @@
   </div>
 <canvas id="gl"></canvas>
 
+<script src="skybox.js"></script>
+<script src="terrain.js"></script>
+<script src="postcompose.js"></script>
+
 <script>
 /*** ---------- Config ---------- ***/
 const HEIGHTMAP_DATA_URL = `heightmap2.png`;
@@ -145,10 +149,7 @@ const statusEl = document.getElementById('status');
 const recenterBtn = document.getElementById('recenter');
 
 let gl; // declare before first use (resize() checks this)
-// Forward declare offscreen layer resources so we can init before definitions
-let layerFbos, layerTexs, layerDepth;
-// Skybox resources
-let skyProg = null, skyLoc = null, skyTex = null;
+// Skybox handled by skybox.js
 
 function resize() {
   const dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -157,14 +158,14 @@ function resize() {
   canvas.width = w; canvas.height = h;
   canvas.style.width = '100vw'; canvas.style.height = '100vh';
   // Recreate FBOs after gl is initialized in boot sequence
-  if(typeof gl !== 'undefined' && gl){ createLayerTargets(); }
+  if(typeof gl !== 'undefined' && gl){ if(typeof postCreateLayerTargets==='function') postCreateLayerTargets(gl, canvas.width, canvas.height, LAYERS, RES_SCALE); }
 }
 resize(); addEventListener('resize', resize);
 
 gl = canvas.getContext('webgl2', {antialias:false, alpha:false});
 if(!gl){ alert('WebGL2 required'); throw new Error('No WebGL2'); }
 // Initialize layer targets once GL exists
-createLayerTargets();
+if(typeof postCreateLayerTargets==='function') postCreateLayerTargets(gl, canvas.width, canvas.height, LAYERS, RES_SCALE);
 
 // UI bindings
 const ctlViewFar = document.getElementById('ctl_viewFar');
@@ -256,7 +257,7 @@ ctlHScale.addEventListener('change', ()=>{ // rebuild terrain with new vertical 
 ctlChkSize.addEventListener('input', ()=>{ CHECKER_SIZE = Number(ctlChkSize.value); vChkSize.textContent = CHECKER_SIZE.toFixed(0); });
 ctlChkAlpha.addEventListener('input', ()=>{ CHECKER_ALPHA = Number(ctlChkAlpha.value); vChkAlpha.textContent = CHECKER_ALPHA.toFixed(2); });
 ctlLayerPasses.addEventListener('input', ()=>{ LAYER_PASSES = Math.max(1, Math.min(LAYERS, Number(ctlLayerPasses.value))); vLayerPasses.textContent = LAYER_PASSES.toString(); });
-ctlResScale.addEventListener('input', ()=>{ RES_SCALE = Number(ctlResScale.value); vResScale.textContent = RES_SCALE.toFixed(2); createLayerTargets(); });
+ctlResScale.addEventListener('input', ()=>{ RES_SCALE = Number(ctlResScale.value); vResScale.textContent = RES_SCALE.toFixed(2); if(typeof postCreateLayerTargets==='function') postCreateLayerTargets(gl, canvas.width, canvas.height, LAYERS, RES_SCALE); });
 ctlLockLayer.addEventListener('change', ()=>{ LOCK_LAYER_TO_VIEW = ctlLockLayer.checked; if(LOCK_LAYER_TO_VIEW){ LAYER_MAX_DIST = VIEW_FAR; ctlLayerMax.value = LAYER_MAX_DIST; vLayerMax.textContent = LAYER_MAX_DIST.toFixed(0);} });
 ctlViewFar.addEventListener('input', ()=>{ if(LOCK_LAYER_TO_VIEW){ LAYER_MAX_DIST = VIEW_FAR; ctlLayerMax.value = LAYER_MAX_DIST; vLayerMax.textContent = LAYER_MAX_DIST.toFixed(0);} });
 // Fog controls removed
@@ -472,226 +473,18 @@ gl.bindVertexArray(vao);
 
 const vbo = gl.createBuffer();
 const ibo = gl.createBuffer();
+let terrainAttribsSet = false;
 
+// legacy counter (unused; terrain.js provides counts)
 let indexCount = 0;
 let activeBand = -1; // -1 = all
 
-// ---------- Offscreen targets for 14 layers (color RGBA + depth) ----------
+// Offscreen targets moved to postcompose.js
 
-function createLayerTargets(){
-  const w = canvas.width, h = canvas.height;
-  const rw = Math.max(1, Math.floor(w * RES_SCALE));
-  const rh = Math.max(1, Math.floor(h * RES_SCALE));
-  // Lazy initialize arrays on first use to ensure availability before any calls
-  if(!layerFbos) layerFbos = new Array(LAYERS);
-  if(!layerTexs) layerTexs = new Array(LAYERS);
-  if(!layerDepth) layerDepth = new Array(LAYERS);
-  for(let i=0;i<LAYERS;i++){
-    if(layerTexs[i]){ gl.deleteTexture(layerTexs[i]); layerTexs[i]=null; }
-    if(layerDepth[i]){ gl.deleteRenderbuffer(layerDepth[i]); layerDepth[i]=null; }
-    if(layerFbos[i]){ gl.deleteFramebuffer(layerFbos[i]); layerFbos[i]=null; }
-
-    const tex = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, rw, rh, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-
-    const rb = gl.createRenderbuffer();
-    gl.bindRenderbuffer(gl.RENDERBUFFER, rb);
-    gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, rw, rh);
-
-    const fbo = gl.createFramebuffer();
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, rb);
-
-    const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
-    if(status !== gl.FRAMEBUFFER_COMPLETE){
-      console.error('FBO incomplete for layer', i, status.toString());
-    }
-    layerTexs[i] = tex;
-    layerDepth[i] = rb;
-    layerFbos[i] = fbo;
-  }
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-}
-
-// Terrain height sampling data for collision/grounding
-let terrainHeights = null; // Float32Array size w*h of heights in world units
-let terrainW = 0, terrainH = 0;
-
-function sampleTerrainHeightAtWorld(wx, wz){
-  if(!terrainHeights) return 0.0;
-  // Map world XZ in [-SIZE, SIZE] to grid coordinates [0..w-1],[0..h-1]
-  const u = (wx / (SIZE*2.0) + 0.5) * (terrainW - 1);
-  const v = (wz / (SIZE*2.0) + 0.5) * (terrainH - 1);
-  const i0 = Math.max(0, Math.min(terrainW-1, Math.floor(u)));
-  const j0 = Math.max(0, Math.min(terrainH-1, Math.floor(v)));
-  const i1 = Math.min(terrainW-1, i0+1);
-  const j1 = Math.min(terrainH-1, j0+1);
-  const fu = u - i0, fv = v - j0;
-  const h00 = terrainHeights[j0*terrainW + i0];
-  const h10 = terrainHeights[j0*terrainW + i1];
-  const h01 = terrainHeights[j1*terrainW + i0];
-  const h11 = terrainHeights[j1*terrainW + i1];
-  const h0 = h00*(1.0-fu) + h10*fu;
-  const h1 = h01*(1.0-fu) + h11*fu;
-  return h0*(1.0-fv) + h1*fv;
-}
+// Terrain sampling moved to terrain.js
 
 /*** ---------- Heightmap -> Terrain Mesh ---------- ***/
-function buildTerrainFromImage(img){
-  const w = GRID, h = GRID;
-  const c = document.createElement('canvas');
-  c.width = img.width; c.height = img.height;
-  const cx = c.getContext('2d');
-  cx.drawImage(img, 0, 0);
-  const imgd = cx.getImageData(0,0,img.width,img.height).data;
-
-  // sRGB -> linear helper
-  function srgbToLinear(c){
-    c = Math.max(0, Math.min(1, c));
-    if(c <= 0.04045) return c/12.92;
-    return Math.pow((c + 0.055)/1.055, 2.4);
-  }
-
-  function pixelLuminanceAt(idx){
-    const r = imgd[idx]   * (1.0/255.0);
-    const g = imgd[idx+1] * (1.0/255.0);
-    const b = imgd[idx+2] * (1.0/255.0);
-    // perceptual luma weights
-    const srgbLum = 0.2126*r + 0.7152*g + 0.0722*b;
-    return srgbToLinear(srgbLum);
-  }
-
-  // Bilinear grayscale sampling in [0,1] with sRGB->linear correction
-  function sample(x,y){
-    const xClamped = Math.max(0, Math.min(img.width-1, x));
-    const yClamped = Math.max(0, Math.min(img.height-1, y));
-    const x0 = Math.floor(xClamped);
-    const y0 = Math.floor(yClamped);
-    const x1 = Math.min(img.width-1, x0+1);
-    const y1 = Math.min(img.height-1, y0+1);
-    const fx = xClamped - x0;
-    const fy = yClamped - y0;
-
-    const idx00 = (y0*img.width + x0)*4;
-    const idx10 = (y0*img.width + x1)*4;
-    const idx01 = (y1*img.width + x0)*4;
-    const idx11 = (y1*img.width + x1)*4;
-
-    const v00 = pixelLuminanceAt(idx00);
-    const v10 = pixelLuminanceAt(idx10);
-    const v01 = pixelLuminanceAt(idx01);
-    const v11 = pixelLuminanceAt(idx11);
-
-    const v0 = v00*(1.0-fx) + v10*fx;
-    const v1 = v01*(1.0-fx) + v11*fx;
-    return v0*(1.0-fy) + v1*fy;
-  }
-
-  // Precompute heights for normals
-  const heights = new Float32Array(w*h);
-  for(let j=0;j<h;j++){
-    for(let i=0;i<w;i++){
-      const u = i/(w-1), v = j/(h-1);
-      const sx = u*(img.width-1);
-      const sy = v*(img.height-1);
-      const elev = sample(sx, sy);
-      heights[j*w + i] = elev * HEIGHT_SCALE;
-    }
-  }
-
-  const stepX = (SIZE*2.0)/(w-1);
-  const stepZ = (SIZE*2.0)/(h-1);
-
-  function getHeight(ii,jj){
-    const iC = Math.max(0, Math.min(w-1, ii));
-    const jC = Math.max(0, Math.min(h-1, jj));
-    return heights[jC*w + iC];
-  }
-
-  function computeNormal(ii,jj){
-    // Central differences with world-space scaling to avoid exaggerated slopes
-    const hl = getHeight(ii-1, jj);
-    const hr = getHeight(ii+1, jj);
-    const hu = getHeight(ii, jj-1);
-    const hd = getHeight(ii, jj+1);
-    const dx = (hr - hl) / (2 * stepX);
-    const dz = (hd - hu) / (2 * stepZ);
-    // Tangent vectors in world space
-    const tx = [1.0, dx, 0.0];
-    const tz = [0.0, dz, 1.0];
-    // n = normalize(cross(tz, tx)) to keep +Y up
-    const nx = tz[1]*tx[2] - tz[2]*tx[1];
-    const ny = tz[2]*tx[0] - tz[0]*tx[2];
-    const nz = tz[0]*tx[1] - tz[1]*tx[0];
-    const len = Math.max(1e-6, Math.hypot(nx, ny, nz));
-    return [nx/len, ny/len, nz/len];
-  }
-
-  const verts = new Float32Array(w*h*9); // pos(3)+norm(3)+col(3)
-  const ind = new Uint32Array((w-1)*(h-1)*6);
-
-  let p = 0;
-  for(let j=0;j<h;j++){
-    for(let i=0;i<w;i++){
-      const u = i/(w-1), v = j/(h-1);
-      const x = (u-0.5)*SIZE*2.0;
-      const z = (v-0.5)*SIZE*2.0;
-
-      const y = heights[j*w + i];
-      const n = computeNormal(i, j);
-
-      // flat color by height (greens to browns to snow)
-      const elevN = y / HEIGHT_SCALE;
-      let col = [0.3,0.55,0.35];
-      if(elevN>0.55) col = [0.5,0.42,0.32];
-      if(elevN>0.82) col = [0.9,0.9,0.92];
-
-      // pos
-      verts[p++] = x; verts[p++] = y; verts[p++] = z;
-      // norm
-      verts[p++] = n[0]; verts[p++] = n[1]; verts[p++] = n[2];
-      // col
-      verts[p++] = col[0]; verts[p++] = col[1]; verts[p++] = col[2];
-    }
-  }
-
-  let q=0;
-  for(let j=0;j<h-1;j++){
-    for(let i=0;i<w-1;i++){
-      const a = j*w + i;
-      const b = a + 1;
-      const c1 = a + w;
-      const d = c1 + 1;
-      ind[q++] = a; ind[q++] = c1; ind[q++] = b;
-      ind[q++] = b; ind[q++] = c1; ind[q++] = d;
-    }
-  }
-  indexCount = ind.length;
-
-  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
-  gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
-
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
-  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, ind, gl.STATIC_DRAW);
-
-  gl.enableVertexAttribArray(0);
-  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 36, 0);
-  gl.enableVertexAttribArray(2);
-  gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 36, 12);
-  gl.enableVertexAttribArray(1);
-  gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 36, 24);
-
-  // expose heights for collision sampling
-  terrainHeights = heights;
-  terrainW = w;
-  terrainH = h;
-}
+// Implemented in terrain.js
 
 /*** ---------- Camera / Controls ---------- ***/
 let camPos = {x:0, y:30, z:-SIZE*0.9};
@@ -706,7 +499,7 @@ function recenter(){
   camPos = {x:0, y:60, z:-SIZE*0.9};
   yaw = 0; pitch = 0; velY = 0;
   // snap to terrain if available
-  const gy = sampleTerrainHeightAtWorld(camPos.x, camPos.z);
+  const gy = sampleTerrainHeightAtWorld(camPos.x, camPos.z, SIZE);
   camPos.y = gy + EYE_HEIGHT;
 }
 recenterBtn.onclick = recenter;
@@ -748,7 +541,7 @@ function tick(dt){
   camPos.z += (mz/len)*SPEED*dt;
 
   // Ground follow: keep camera riding exactly above terrain
-  const groundY = sampleTerrainHeightAtWorld(camPos.x, camPos.z);
+  const groundY = sampleTerrainHeightAtWorld(camPos.x, camPos.z, SIZE);
   camPos.y = groundY + EYE_HEIGHT;
   velY = 0;
 }
@@ -825,8 +618,10 @@ function frame(t){
 
   // 1) Render each band to its texture
   gl.bindVertexArray(vao);
+  // Bind terrain buffers from terrain module (vbo/ibo already filled)
+  if(typeof bindTerrainBuffers==='function') bindTerrainBuffers(gl);
   for(let i=0;i<LAYER_PASSES;i++){
-    gl.bindFramebuffer(gl.FRAMEBUFFER, layerFbos[i]);
+    if(typeof postBindLayerFbo==='function') postBindLayerFbo(gl, i);
     const rw = Math.max(1, Math.floor(canvas.width * RES_SCALE));
     const rh = Math.max(1, Math.floor(canvas.height * RES_SCALE));
     gl.viewport(0,0,rw,rh);
@@ -834,7 +629,8 @@ function frame(t){
     gl.clearColor(0.0,0.0,0.0,0.0);
     gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
     gl.uniform1i(loc.u_activeBand, i);
-    gl.drawElements(gl.TRIANGLES, indexCount, gl.UNSIGNED_INT, 0);
+    const terrainIndexCount = (typeof getTerrainIndexCount==='function') ? getTerrainIndexCount() : indexCount;
+    gl.drawElements(gl.TRIANGLES, terrainIndexCount, gl.UNSIGNED_INT, 0);
   }
 
   // 2) Composite textures to screen as flat layers (nearest on top)
@@ -844,9 +640,9 @@ function frame(t){
   gl.clearColor(0.0,0.0,0.0,1);
   gl.clear(gl.COLOR_BUFFER_BIT);
   // Sky as background (drawn first)
-  drawSkyBackground(aspect);
+  if(typeof drawSkyBackground === 'function') drawSkyBackground(gl, aspect, FOVY, getDir, canvas, SKYBOX_URL);
 
-  drawLayersFullscreen();
+  if(typeof postDrawLayersFullscreen==='function') postDrawLayersFullscreen(gl, canvas.width, canvas.height, LAYER_PASSES);
 
   requestAnimationFrame(frame);
 }
@@ -892,64 +688,15 @@ function normalizeVec3(v){
   return [v[0]/l, v[1]/l, v[2]/l];
 }
 
-/*** ---------- Skybox (equirectangular) ---------- ***/
-function initSkyProgram(){
-  if(skyProg) return;
-  const VSQ = `#version 300 es\nlayout(location=0) in vec2 a_pos;\nlayout(location=1) in vec2 a_uv;\nout vec2 v_uv;\nvoid main(){ v_uv = a_uv; gl_Position = vec4(a_pos,0.0,1.0); }`;
-  const FSS = `#version 300 es\nprecision highp float;\n\nin vec2 v_uv;\n\nuniform sampler2D u_sky;\nuniform vec3 u_right;\nuniform vec3 u_up;\nuniform vec3 u_forward;\nuniform float u_aspect;\nuniform float u_tanHalfFovY;\n\nout vec4 o_color;\n\nvoid main(){\n  vec2 ndc = v_uv * 2.0 - 1.0;\n  vec3 dirCam = normalize(vec3(ndc.x * u_aspect * u_tanHalfFovY, ndc.y * u_tanHalfFovY, -1.0));\n  vec3 dirWorld = normalize(u_right * dirCam.x + u_up * dirCam.y + u_forward * dirCam.z);\n  float pi = 3.14159265358979323846;\n  float theta = acos(clamp(dirWorld.y, -1.0, 1.0));\n  float phi = atan(-dirWorld.z, dirWorld.x);\n  vec2 uv = vec2(phi / (2.0*pi) + 0.5, theta / pi);\n  vec3 col = texture(u_sky, uv).rgb;\n  o_color = vec4(col, 1.0);\n}`;
-  const v = compile(gl.VERTEX_SHADER, VSQ);
-  const f = compile(gl.FRAGMENT_SHADER, FSS);
-  skyProg = link(v, f);
-  skyLoc = {
-    u_sky: gl.getUniformLocation(skyProg, 'u_sky'),
-    u_right: gl.getUniformLocation(skyProg, 'u_right'),
-    u_up: gl.getUniformLocation(skyProg, 'u_up'),
-    u_forward: gl.getUniformLocation(skyProg, 'u_forward'),
-    u_aspect: gl.getUniformLocation(skyProg, 'u_aspect'),
-    u_tanHalfFovY: gl.getUniformLocation(skyProg, 'u_tanHalfFovY'),
-  };
+function crossVec3(a,b){
+  return [
+    a[1]*b[2] - a[2]*b[1],
+    a[2]*b[0] - a[0]*b[2],
+    a[0]*b[1] - a[1]*b[0]
+  ];
 }
 
-function createSkyTexture(img){
-  if(skyTex){ gl.deleteTexture(skyTex); skyTex = null; }
-  skyTex = gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D, skyTex);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
-}
-
-function drawSkyBackground(aspect){
-  if(!skyTex) return;
-  ensureFullscreenGeom();
-  initSkyProgram();
-  gl.useProgram(skyProg);
-  gl.bindVertexArray(fsVao);
-  gl.enableVertexAttribArray(0);
-  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 16, 0);
-  gl.enableVertexAttribArray(1);
-  gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 16, 8);
-  const f = getDir();
-  const r = getRight();
-  const upx = r.y*f.z - r.z*f.y;
-  const upy = r.z*f.x - r.x*f.z;
-  const upz = r.x*f.y - r.y*f.x;
-  const fl = Math.hypot(f.x, f.y, f.z) || 1; const rl = Math.hypot(r.x, r.y, r.z) || 1; const ul = Math.hypot(upx, upy, upz) || 1;
-  gl.uniform3f(skyLoc.u_forward, f.x/fl, f.y/fl, f.z/fl);
-  gl.uniform3f(skyLoc.u_right, r.x/rl, r.y/rl, r.z/rl);
-  gl.uniform3f(skyLoc.u_up, upx/ul, upy/ul, upz/ul);
-  gl.uniform1f(skyLoc.u_aspect, aspect);
-  gl.uniform1f(skyLoc.u_tanHalfFovY, Math.tan(FOVY*0.5));
-  gl.activeTexture(gl.TEXTURE0);
-  gl.bindTexture(gl.TEXTURE_2D, skyTex);
-  gl.uniform1i(skyLoc.u_sky, 0);
-  gl.disable(gl.DEPTH_TEST);
-  gl.disable(gl.BLEND);
-  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-}
+/*** ---------- Skybox (implemented in skybox.js) ---------- ***/
 /*** ---------- Boot ---------- ***/
 // Fullscreen quad for compositing
 let fsVao=null, fsVbo=null;
@@ -990,9 +737,12 @@ function loadImage(url){
       loadImage(SKYBOX_URL)
     ]);
     statusEl.textContent = `heightmap loaded: ${img.width}×${img.height} — building terrain…`;
-    buildTerrainFromImage(img);
-    // Setup sky texture
-    createSkyTexture(skyImg);
+    if(typeof buildTerrainFromImage === 'function'){
+      await new Promise((resolve)=> setTimeout(resolve, 0));
+      buildTerrainFromImage(gl, img, GRID, SIZE, HEIGHT_SCALE);
+    }
+    // Setup sky texture (via skybox.js if available)
+    if(typeof createSkyTexture === 'function') createSkyTexture(gl, skyImg);
     statusEl.textContent = `ready.`;
     requestAnimationFrame(frame);
   }catch(e){

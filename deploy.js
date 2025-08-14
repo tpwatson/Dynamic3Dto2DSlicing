@@ -31,7 +31,7 @@ try {
   
   // Start development server
   console.log('🔥 Starting development server...');
-  execSync('npm run start', { stdio: 'inherit' });
+  execSync('npm run dev', { stdio: 'inherit' });
   
 } catch (error) {
   console.error('❌ Deployment failed:', error.message);

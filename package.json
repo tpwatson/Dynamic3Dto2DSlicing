@@ -1,17 +1,17 @@
 {
-  "name": "walking-simulator-server",
-  "version": "1.0.0",
-  "description": "Simple local server for the walking simulator",
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js",
-    "deploy": "node deploy.js"
-  },
-  "dependencies": {
-    "express": "^4.18.2"
-  },
-  "keywords": ["webgl", "walking-simulator", "local-server"],
-  "author": "",
-  "license": "MIT"
-}
+    "name": "walking-simulator-server",
+    "version": "1.0.0",
+    "description": "Simple local server for the walking simulator",
+    "main": "server.js",
+    "scripts": {
+      "start": "node server.js",
+      "dev": "node server.js",
+      "deploy": "node deploy.js"
+    },
+    "dependencies": {
+      "express": "^4.18.2"
+    },
+    "keywords": ["webgl", "walking-simulator", "local-server"],
+    "author": "",
+    "license": "MIT"
+  }
