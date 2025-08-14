@@ -141,12 +141,22 @@ const HEIGHT_SCALE = 2400.0; // how tall the white peaks get
 const FOVY = 60 * Math.PI / 180;
 
 // Movement
-const SPEED = 80.0;         // m/s
+const SPEED = 10.0;         // base walk speed (m/s)
 const LOOK_SENS = 0.0023;   // mouse
 const KEY_LOOK_SPEED = 1.8; // rad/sec for Arrow keys look
 const JUMP = 8.0;           // simple hop
 const GRAV = 25.0;
 const EYE_HEIGHT = 2.0;     // player eye height above terrain
+// Sprint/stamina (sedentary baseline)
+const SPRINT_SPEED_TOP = 60.0;   // m/s for first ~5s
+const SPRINT_SPEED_LONG = 50.0;  // m/s for next ~20-30s
+const SPRINT_TOP_DURATION = 5.0; // seconds at 60
+const SPRINT_LONG_DURATION = 25.0; // seconds at 50
+const SPRINT_DECAY_DURATION = 20.0; // seconds to taper 50->0 if holding sprint
+const SPRINT_TOTAL_DURATION = SPRINT_TOP_DURATION + SPRINT_LONG_DURATION + SPRINT_DECAY_DURATION; // ~50s
+const STAMINA_DRAIN_PER_SEC = 1.0 / SPRINT_TOTAL_DURATION; // drains to 0 in ~50s of continuous sprinting
+const STAMINA_RECOVER_REST = 1.0 / 45.0;  // full recover in ~45s if resting
+const STAMINA_RECOVER_MOVE = 1.0 / 90.0;  // full recover in ~90s if walking
 
 // Painterly / layers
 const LAYERS = 14;
@@ -267,6 +277,13 @@ function buildBandButtons(){
   }
 }
 buildBandButtons();
+
+// Optional: stamina readout in status line
+function updateStatus(){
+  if(!statusEl) return;
+  const pct = Math.round(stamina*100);
+  statusEl.textContent = `stamina ${pct}%`;
+}
 
 ctlViewFar.addEventListener('input', ()=>{ VIEW_FAR = Number(ctlViewFar.value); vViewFar.textContent = VIEW_FAR.toFixed(0); });
 ctlLayerMax.addEventListener('input', ()=>{ LAYER_MAX_DIST = Number(ctlLayerMax.value); vLayerMax.textContent = LAYER_MAX_DIST.toFixed(0); });
@@ -518,6 +535,10 @@ let velY = 0;
 // Diorama card tilt (radians)
 let cardTiltX = 0, cardTiltY = 0;
 let cardTiltXTarget = 0, cardTiltYTarget = 0;
+// Sprint/stamina state
+let stamina = 1.0;             // 0..1
+let sprintHoldTime = 0.0;      // seconds continuously holding sprint
+let isSprinting = false;
 
 const keys = {};
 addEventListener('keydown', e=>{ keys[e.key.toLowerCase()] = true; if(e.key==='r'||e.key==='R') recenter(); if(e.key==='h'||e.key==='H') setUiHidden(!uiHidden); });
@@ -569,6 +590,37 @@ function tick(dt){
     mx += (f.x* -joyLVec.y) + (r.x* joyLVec.x);
     mz += (f.z* -joyLVec.y) + (r.z* joyLVec.x);
   }
+  // Sprint mechanics (Shift key or right-joystick push-in optional later)
+  const sprintKey = keys['shift'] === true;
+  const moving = (Math.abs(mx) + Math.abs(mz)) > 1e-4;
+  if(sprintKey && moving && stamina > 0){
+    isSprinting = true;
+    sprintHoldTime += dt;
+    stamina = Math.max(0, stamina - STAMINA_DRAIN_PER_SEC * dt);
+  } else {
+    isSprinting = false;
+    sprintHoldTime = 0;
+    // recover slower while walking, faster while resting
+    const rec = moving ? STAMINA_RECOVER_MOVE : STAMINA_RECOVER_REST;
+    stamina = Math.min(1, stamina + rec * dt);
+  }
+
+  // Determine speed
+  let curSpeed = SPEED;
+  if(isSprinting){
+    if(sprintHoldTime <= SPRINT_TOP_DURATION){
+      curSpeed = SPRINT_SPEED_TOP;
+    } else if(sprintHoldTime <= SPRINT_TOP_DURATION + SPRINT_LONG_DURATION){
+      curSpeed = SPRINT_SPEED_LONG;
+    } else {
+      // decay linearly from SPRINT_SPEED_LONG to 0 over SPRINT_DECAY_DURATION
+      const t = Math.min(1, (sprintHoldTime - (SPRINT_TOP_DURATION + SPRINT_LONG_DURATION)) / SPRINT_DECAY_DURATION);
+      curSpeed = SPRINT_SPEED_LONG * (1 - t);
+    }
+    // If stamina is zero, clamp speed down further
+    if(stamina <= 0){ curSpeed = Math.min(curSpeed, SPEED * 0.25); }
+  }
+
   // Arrow keys for camera look (works well over remote desktop)
   if(keys['arrowleft']){ yaw -= KEY_LOOK_SPEED * dt; }
   if(keys['arrowright']){ yaw += KEY_LOOK_SPEED * dt; }
@@ -582,8 +634,8 @@ function tick(dt){
   }
   pitch = Math.max(-1.2, Math.min(1.2, pitch));
   const len = Math.hypot(mx,my,mz) || 1;
-  camPos.x += (mx/len)*SPEED*dt;
-  camPos.z += (mz/len)*SPEED*dt;
+  camPos.x += (mx/len)*curSpeed*dt;
+  camPos.z += (mz/len)*curSpeed*dt;
 
   // Ground follow: keep camera riding exactly above terrain
   const groundY = sampleTerrainHeightAtWorld(camPos.x, camPos.z, SIZE);
@@ -632,6 +684,7 @@ let last = performance.now();
 function frame(t){
   const dt = Math.min(0.033, (t-last)/1000); last = t;
   tick(dt);
+  updateStatus();
   // no diorama tilt
   cardTiltX = 0; cardTiltY = 0; cardTiltXTarget = 0; cardTiltYTarget = 0;
 
