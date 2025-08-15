@@ -48,6 +48,19 @@
     <input id="ctl_chkSize" type="range" min="1" max="200" step="1">
     <label>Checker Opacity <span class="val" id="v_chkAlpha"></span></label>
     <input id="ctl_chkAlpha" type="range" min="0" max="1" step="0.01">
+    <label><input id="ctl_chkScreen" type="checkbox" checked> Checker Screen-space (per layer)</label>
+    <label><input id="ctl_outlineOn" type="checkbox" checked> Edge Outlines</label>
+    <label>Outline Sensitivity <span class="val" id="v_outScale"></span></label>
+    <input id="ctl_outScale" type="range" min="0" max="30" step="1">
+    <label>Outline Intensity <span class="val" id="v_outInt"></span></label>
+    <input id="ctl_outInt" type="range" min="0" max="1" step="0.01">
+    <label><input id="ctl_waveOn" type="checkbox"> Magic Wave (per layer)</label>
+    <label>Wave Amp <span class="val" id="v_waveAmp"></span></label>
+    <input id="ctl_waveAmp" type="range" min="0" max="800" step="10">
+    <label>Wave Speed <span class="val" id="v_waveSpeed"></span></label>
+    <input id="ctl_waveSpeed" type="range" min="0" max="8" step="0.1">
+    <label>Wave Phase/Layer <span class="val" id="v_wavePhase"></span></label>
+    <input id="ctl_wavePhase" type="range" min="0" max="3.1415" step="0.01">
     <label>Layer Passes (perf) <span class="val" id="v_layerPasses"></span></label>
     <input id="ctl_layerPasses" type="range" min="1" max="14" step="1">
     <label>Layer Res Scale (perf) <span class="val" id="v_resScale"></span></label>
@@ -66,6 +79,7 @@
 
 <!-- Diorama Card will be drawn by WebGL inside the main canvas; no extra DOM needed -->
 
+<script src="joystick.js"></script>
 <script src="skybox.js"></script>
 <script src="terrain.js"></script>
 <script src="postcompose.js"></script>
@@ -147,6 +161,10 @@ const KEY_LOOK_SPEED = 1.8; // rad/sec for Arrow keys look
 const JUMP = 8.0;           // simple hop
 const GRAV = 25.0;
 const EYE_HEIGHT = 2.0;     // player eye height above terrain
+const GLIDE_GRAVITY_MULT = 0.25; // gravity multiplier while holding Space in air
+const MAX_FALL_SPEED = 60.0;     // terminal velocity (m/s)
+const GLIDE_ACCEL = 102.0;        // horizontal acceleration while gliding (m/s^2)
+const GLIDE_MAX_SPEED = 100000000.0;   // max horizontal glide speed (m/s)
 // Frame rate cap (testing)
 const FPS_CAP_ENABLED = true;
 const FPS_CAP = 30; // target FPS when cap is enabled
@@ -169,9 +187,20 @@ let STROKE_PX = 2.0;          // base “pixel/brush” size (screen-space)
 let VARIATION = 0.0;         // 5% size variation
 let CHECKER_SIZE = 4.0;      // world units per checker cell
 let CHECKER_ALPHA = 0.04;      // overlay opacity (0..1)
-  let LAYER_PASSES = 14;         // how many bands to render (near-first)
+ let CHECKER_SCREEN = true;     // when true, draw checker in screen-space per layer
+// Outline defaults
+let OUTLINE_ON = true;
+let OUTLINE_SCALE = 4;       // sensitivity multiplier (higher catches more edges)
+let OUTLINE_INTENSITY = 0.25;   // 0..1, how black the edge goes
+let OUTLINE_BAND = 0;          // outline only the nearest band by default
+let LAYER_PASSES = 14;         // how many bands to render (near-first)
 let RES_SCALE = 0.25;           // 1.0 = full res, <1 = render to smaller FBOs
 let LOCK_LAYER_TO_VIEW = true; // keep LAYER_MAX_DIST tracking VIEW_FAR
+// Magic wave effect
+let WAVE_ON = false;
+let WAVE_AMP = 0.0;       // meters of vertical offset
+let WAVE_SPEED = 2.0;     // radians per second
+let WAVE_PHASE = 0.6;     // radians phase difference per layer
 
 /*** ---------- WebGL2 Boilerplate ---------- ***/
 const canvas = document.getElementById('gl');
@@ -213,6 +242,14 @@ const ctlVar = document.getElementById('ctl_var');
 const ctlHScale = document.getElementById('ctl_hscale');
 const ctlChkSize = document.getElementById('ctl_chkSize');
 const ctlChkAlpha = document.getElementById('ctl_chkAlpha');
+const ctlChkScreen = document.getElementById('ctl_chkScreen');
+const ctlOutlineOn = document.getElementById('ctl_outlineOn');
+const ctlOutScale = document.getElementById('ctl_outScale');
+const ctlOutInt = document.getElementById('ctl_outInt');
+const ctlWaveOn = document.getElementById('ctl_waveOn');
+const ctlWaveAmp = document.getElementById('ctl_waveAmp');
+const ctlWaveSpeed = document.getElementById('ctl_waveSpeed');
+const ctlWavePhase = document.getElementById('ctl_wavePhase');
 const ctlLayerPasses = document.getElementById('ctl_layerPasses');
 const ctlResScale = document.getElementById('ctl_resScale');
 const ctlLockLayer = document.getElementById('ctl_lockLayer');
@@ -223,6 +260,11 @@ const vVar = document.getElementById('v_var');
 const vHScale = document.getElementById('v_hscale');
 const vChkSize = document.getElementById('v_chkSize');
 const vChkAlpha = document.getElementById('v_chkAlpha');
+const vOutScale = document.getElementById('v_outScale');
+const vOutInt = document.getElementById('v_outInt');
+const vWaveAmp = document.getElementById('v_waveAmp');
+const vWaveSpeed = document.getElementById('v_waveSpeed');
+const vWavePhase = document.getElementById('v_wavePhase');
 const vLayerPasses = document.getElementById('v_layerPasses');
 const vResScale = document.getElementById('v_resScale');
 const bandsDiv = document.getElementById('bands');
@@ -247,9 +289,17 @@ function syncUI(){
   ctlHScale.value = HEIGHT_SCALE;
   ctlChkSize.value = CHECKER_SIZE;
   ctlChkAlpha.value = CHECKER_ALPHA;
+  ctlOutlineOn.checked = OUTLINE_ON;
+  ctlOutScale.value = OUTLINE_SCALE;
+  ctlOutInt.value = OUTLINE_INTENSITY;
+  if(ctlChkScreen) ctlChkScreen.checked = CHECKER_SCREEN;
   ctlLayerPasses.value = LAYER_PASSES;
   ctlResScale.value = RES_SCALE;
   ctlLockLayer.checked = LOCK_LAYER_TO_VIEW;
+  if(ctlWaveOn){ ctlWaveOn.checked = WAVE_ON; }
+  if(ctlWaveAmp){ ctlWaveAmp.value = WAVE_AMP; }
+  if(ctlWaveSpeed){ ctlWaveSpeed.value = WAVE_SPEED; }
+  if(ctlWavePhase){ ctlWavePhase.value = WAVE_PHASE; }
   vViewFar.textContent = VIEW_FAR.toFixed(0);
   vLayerMax.textContent = LAYER_MAX_DIST.toFixed(0);
   vStroke.textContent = STROKE_PX.toFixed(0);
@@ -257,8 +307,13 @@ function syncUI(){
   vHScale.textContent = HEIGHT_SCALE.toFixed(0);
   vChkSize.textContent = CHECKER_SIZE.toFixed(0);
   vChkAlpha.textContent = CHECKER_ALPHA.toFixed(2);
+  vOutScale.textContent = OUTLINE_SCALE.toFixed(2);
+  vOutInt.textContent = OUTLINE_INTENSITY.toFixed(2);
   vLayerPasses.textContent = LAYER_PASSES.toString();
   vResScale.textContent = RES_SCALE.toFixed(2);
+  if(vWaveAmp) vWaveAmp.textContent = WAVE_AMP.toFixed(0);
+  if(vWaveSpeed) vWaveSpeed.textContent = WAVE_SPEED.toFixed(2);
+  if(vWavePhase) vWavePhase.textContent = WAVE_PHASE.toFixed(2);
 }
 syncUI();
 
@@ -301,8 +356,17 @@ ctlHScale.addEventListener('change', ()=>{ // rebuild terrain with new vertical 
 });
 ctlChkSize.addEventListener('input', ()=>{ CHECKER_SIZE = Number(ctlChkSize.value); vChkSize.textContent = CHECKER_SIZE.toFixed(0); });
 ctlChkAlpha.addEventListener('input', ()=>{ CHECKER_ALPHA = Number(ctlChkAlpha.value); vChkAlpha.textContent = CHECKER_ALPHA.toFixed(2); });
+  if(ctlChkScreen){ ctlChkScreen.addEventListener('change', ()=>{ CHECKER_SCREEN = ctlChkScreen.checked; }); }
 ctlLayerPasses.addEventListener('input', ()=>{ LAYER_PASSES = Math.max(1, Math.min(LAYERS, Number(ctlLayerPasses.value))); vLayerPasses.textContent = LAYER_PASSES.toString(); });
 ctlResScale.addEventListener('input', ()=>{ RES_SCALE = Number(ctlResScale.value); vResScale.textContent = RES_SCALE.toFixed(2); if(typeof postCreateLayerTargets==='function') postCreateLayerTargets(gl, canvas.width, canvas.height, LAYERS, RES_SCALE); });
+// Outline controls
+if(ctlOutlineOn){ ctlOutlineOn.addEventListener('change', ()=>{ OUTLINE_ON = ctlOutlineOn.checked; }); }
+if(ctlOutScale){ ctlOutScale.addEventListener('input', ()=>{ OUTLINE_SCALE = Number(ctlOutScale.value); vOutScale.textContent = OUTLINE_SCALE.toFixed(2); }); }
+if(ctlOutInt){ ctlOutInt.addEventListener('input', ()=>{ OUTLINE_INTENSITY = Number(ctlOutInt.value); vOutInt.textContent = OUTLINE_INTENSITY.toFixed(2); }); }
+if(ctlWaveOn){ ctlWaveOn.addEventListener('change', ()=>{ WAVE_ON = ctlWaveOn.checked; }); }
+if(ctlWaveAmp){ ctlWaveAmp.addEventListener('input', ()=>{ WAVE_AMP = Number(ctlWaveAmp.value); vWaveAmp.textContent = WAVE_AMP.toFixed(0); }); }
+if(ctlWaveSpeed){ ctlWaveSpeed.addEventListener('input', ()=>{ WAVE_SPEED = Number(ctlWaveSpeed.value); vWaveSpeed.textContent = WAVE_SPEED.toFixed(2); }); }
+if(ctlWavePhase){ ctlWavePhase.addEventListener('input', ()=>{ WAVE_PHASE = Number(ctlWavePhase.value); vWavePhase.textContent = WAVE_PHASE.toFixed(2); }); }
 ctlLockLayer.addEventListener('change', ()=>{ LOCK_LAYER_TO_VIEW = ctlLockLayer.checked; if(LOCK_LAYER_TO_VIEW){ LAYER_MAX_DIST = VIEW_FAR; ctlLayerMax.value = LAYER_MAX_DIST; vLayerMax.textContent = LAYER_MAX_DIST.toFixed(0);} });
 ctlViewFar.addEventListener('input', ()=>{ if(LOCK_LAYER_TO_VIEW){ LAYER_MAX_DIST = VIEW_FAR; ctlLayerMax.value = LAYER_MAX_DIST; vLayerMax.textContent = LAYER_MAX_DIST.toFixed(0);} });
 // Fog controls removed
@@ -380,6 +444,7 @@ uniform vec3  u_camPos;
 uniform float u_maxDist;
 uniform int   u_layers;
 uniform vec2  u_res;
+  uniform vec2  u_outRes; // final on-screen composite region size in pixels
 uniform float u_time;
 uniform float u_strokePx;
 uniform float u_variation;
@@ -388,7 +453,13 @@ uniform vec3  u_lightColor; // light RGB
 uniform float u_ambient;    // ambient term
 uniform float u_checkerSize; // world units per cell
 uniform float u_checkerAlpha; // opacity of checker overlay
+  uniform bool  u_checkerScreen; // when true, checker grid is screen-space per band
 uniform int   u_activeBand; // -1 = render all; 0..13 = only that band (others discard)
+// Outline controls
+uniform bool  u_outlineOn;      // enable black edge outlines
+uniform float u_outlineScale;   // scales edge sensitivity
+uniform float u_outlineIntensity; // 0..1 how strongly to darken to black on edges
+uniform int   u_outlineBand;    // which band index to outline (0 = nearest)
 // fog uniforms removed (disabled)
 
 // Debug palette for 14 distance layers (index 0 = nearest, 13 = furthest)
@@ -400,7 +471,7 @@ const vec3 PALETTE[14] = vec3[14](
   vec3(0.55, 0.43, 0.24), // 5  greenish brown
   vec3(0.30, 0.69, 0.31), // 6  green
   vec3(0.80, 0.86, 0.22), // 7  greenish yellow
-  vec3(0.11, 0.37, 0.13), // 8  dark green
+  vec3(0.21, 0.47, 0.23), // 8  dark green
   vec3(0.50, 1.00, 0.83), // 9  light blue green
   vec3(0.00, 0.65, 0.65), // 10 medium blue green
   vec3(0.00, 0.30, 0.30), // 11 dark blue green
@@ -440,10 +511,24 @@ float bandIndex(float d, float maxD, float N){
   float lightIntensity = clamp(u_ambient + lambert, 0.0, 1.5);
   vec3 color = layerColor * lightIntensity * u_lightColor;
 
-  // World-space checkerboard (black/white), independent of distance
-  float cx = floor(v_worldXZ.x / max(1.0, u_checkerSize));
-  float cz = floor(v_worldXZ.y / max(1.0, u_checkerSize));
-  float checker = mod(cx + cz, 2.0);
+  // Checkerboard: either world-space or screen-space per band
+  float checker;
+  if(u_checkerScreen){
+    // Screen-space, band-local grid: stable square cells regardless of framebuffer size
+    // Use u_res (current render target) for coordinate system so pixels are square
+    float cell = max(1.0, u_checkerSize);
+    vec2 bandOffset = vec2(hash11(idx*13.7), hash11(idx*7.9)) * cell;
+    vec2 gid = floor((gl_FragCoord.xy + bandOffset));
+    // Divide separately on x and y by the same 'cell' to ensure squares
+    gid.x = floor((gl_FragCoord.x + bandOffset.x) / cell);
+    gid.y = floor((gl_FragCoord.y + bandOffset.y) / cell);
+    checker = mod(gid.x + gid.y, 2.0);
+  } else {
+    // World-space grid
+    float cx = floor(v_worldXZ.x / max(1.0, u_checkerSize));
+    float cz = floor(v_worldXZ.y / max(1.0, u_checkerSize));
+    checker = mod(cx + cz, 2.0);
+  }
   vec3 checkerCol = mix(vec3(0.0), vec3(1.0), checker);
   // Overlay checker onto color
   color = mix(color, checkerCol, clamp(u_checkerAlpha, 0.0, 1.0));
@@ -494,6 +579,29 @@ float bandIndex(float d, float maxD, float N){
 
   // apply mask as coverage and alpha so transparent gaps remain between layers
   float coverage = clamp(mask, 0.0, 1.0);
+  // Screen-space edge outlines based on normal/depth variations
+  if(u_outlineOn && int(idx) == u_outlineBand){
+    // Use derivatives to detect discontinuities that suggest geometric edges
+    vec3 n = normalize(v_norm);
+    float nEdge = length(fwidth(n));                 // normal variation across pixel
+    float zEdge = fwidth(v_eyeZ / max(u_maxDist, 1e-3)); // normalized depth variation
+    // Emphasize cliff tops via slope change (variation of |n.y|)
+    float slope = 1.0 - abs(n.y);                    // 0 flat, 1 vertical
+    float slopeChange = fwidth(slope);
+    // Rim term: surfaces at grazing view angles, gated by slope so it targets ledges
+    vec3 V = normalize(u_camPos - v_world);
+    float rim = smoothstep(0.65, 0.92, 1.0 - abs(dot(n, V)));
+    rim *= smoothstep(0.25, 0.55, slope);
+    // Weighted sum; slope change and rim help catch ridge/ledge boundaries
+    float edge = (nEdge * 1.0 + zEdge * 0.5 + slopeChange * 2.0 + rim * 1.2) * u_outlineScale;
+    // Convert into a 0..1 mask where higher = stronger edge
+    // Adaptive threshold: be a bit more permissive when stroke size is small
+    float t0 = 0.045; // base low threshold
+    float t1 = 0.16;  // base high threshold
+    float edgeMask = smoothstep(t0, t1, edge);
+    // Darken towards black on edges before applying coverage
+    col = mix(col, vec3(0.0), clamp(edgeMask * u_outlineIntensity, 0.0, 1.0));
+  }
   o_color = vec4(mix(paper, col, coverage), coverage);
 }
 `;
@@ -513,6 +621,7 @@ const loc = {
   u_maxDist: gl.getUniformLocation(prog,'u_maxDist'),
   u_layers: gl.getUniformLocation(prog,'u_layers'),
   u_res: gl.getUniformLocation(prog,'u_res'),
+    u_outRes: gl.getUniformLocation(prog,'u_outRes'),
   u_time: gl.getUniformLocation(prog,'u_time'),
   u_strokePx: gl.getUniformLocation(prog,'u_strokePx'),
   u_variation: gl.getUniformLocation(prog,'u_variation'),
@@ -521,7 +630,13 @@ const loc = {
   u_ambient: gl.getUniformLocation(prog,'u_ambient'),
   u_checkerSize: gl.getUniformLocation(prog,'u_checkerSize'),
   u_checkerAlpha: gl.getUniformLocation(prog,'u_checkerAlpha'),
+  u_checkerScreen: gl.getUniformLocation(prog,'u_checkerScreen'),
   u_activeBand: gl.getUniformLocation(prog,'u_activeBand'),
+  // outline uniforms
+  u_outlineOn: gl.getUniformLocation(prog,'u_outlineOn'),
+  u_outlineScale: gl.getUniformLocation(prog,'u_outlineScale'),
+  u_outlineIntensity: gl.getUniformLocation(prog,'u_outlineIntensity'),
+  u_outlineBand: gl.getUniformLocation(prog,'u_outlineBand'),
 };
 
 const vao = gl.createVertexArray();
@@ -546,6 +661,12 @@ let activeBand = -1; // -1 = all
 let camPos = {x:0, y:30, z:-SIZE*0.9};
 let yaw = 0, pitch = 0;
 let velY = 0;
+let isGrounded = false;
+let prevSpaceDown = false;
+let isGliding = false;
+let glideSpeed = 0.0;
+let glideDir = {x:0, z:1};
+let lastMoveDir = {x:0, z:1};
 // Diorama card tilt (radians)
 let cardTiltX = 0, cardTiltY = 0;
 let cardTiltXTarget = 0, cardTiltYTarget = 0;
@@ -647,14 +768,100 @@ function tick(dt){
     pitch += -joyRVec.y * lookRate * dt;
   }
   pitch = Math.max(-1.2, Math.min(1.2, pitch));
+  // Compute intended flat movement direction (used for glide heading capture)
+  const moveLen = Math.hypot(mx, mz);
+  if(moveLen > 1e-4){
+    lastMoveDir.x = mx / moveLen;
+    lastMoveDir.z = mz / moveLen;
+  }
+
   const len = Math.hypot(mx,my,mz) || 1;
   camPos.x += (mx/len)*curSpeed*dt;
   camPos.z += (mz/len)*curSpeed*dt;
 
-  // Ground follow: keep camera riding exactly above terrain
-  const groundY = sampleTerrainHeightAtWorld(camPos.x, camPos.z, SIZE);
-  camPos.y = groundY + EYE_HEIGHT;
-  velY = 0;
+  // --- Vertical physics: jump / gravity / glide ---
+  // Base ground height (include wave of nearest band so player rides it when grounded)
+  let groundY = sampleTerrainHeightAtWorld(camPos.x, camPos.z, SIZE);
+  if(WAVE_ON){
+    groundY += Math.sin(gTimeSec * WAVE_SPEED) * WAVE_AMP;
+  }
+
+  const spaceDown = (keys[' '] === true) || (keys['space'] === true);
+
+  // Determine grounded status (tolerate tiny epsilon)
+  const footY = groundY + EYE_HEIGHT;
+  if(camPos.y <= footY + 0.01){
+    // Snap to ground and reset when landing
+    camPos.y = footY;
+    if(velY < 0) velY = 0;
+    isGrounded = true;
+  } else {
+    isGrounded = false;
+  }
+
+  // Jump on rising edge of Space while grounded
+  if(isGrounded && spaceDown && !prevSpaceDown){
+    velY = JUMP;
+    isGrounded = false;
+    isGliding = false;
+  }
+
+  // Apply gravity if airborne
+  if(!isGrounded){
+    // Enter/maintain glide while holding space
+    if(spaceDown){
+      // On first frame of glide, capture heading and initial speed from current horizontal velocity
+      if(!isGliding){
+        // Estimate current horizontal speed from inputs: curSpeed already applied this frame
+        const vx = (mx/len)*curSpeed; const vz = (mz/len)*curSpeed;
+        const vlen = Math.hypot(vx, vz);
+        glideSpeed = vlen;
+        // If no input, use lastMoveDir heading; otherwise use current intended heading
+        const hx = (moveLen>1e-4) ? (mx/moveLen) : lastMoveDir.x;
+        const hz = (moveLen>1e-4) ? (mz/moveLen) : lastMoveDir.z;
+        glideDir = {x: hx, z: hz};
+        isGliding = true;
+      }
+      // Stamina should recover even if shift is held while gliding (handled below)
+    } else {
+      isGliding = false;
+    }
+
+    // Gravity: reduced while gliding
+    const gravMult = isGliding ? GLIDE_GRAVITY_MULT : 1.0;
+    velY -= GRAV * gravMult * dt;
+    // Clamp terminal velocity (downwards)
+    if(velY < -MAX_FALL_SPEED * (spaceDown ? 0.4 : 1.0)){
+      velY = -MAX_FALL_SPEED * (spaceDown ? 0.4 : 1.0);
+    }
+    camPos.y += velY * dt;
+
+    // Horizontal glide acceleration (does not affect vertical fall speed)
+    if(isGliding){
+      glideSpeed = Math.min(GLIDE_MAX_SPEED, glideSpeed + GLIDE_ACCEL * dt);
+      camPos.x += glideDir.x * glideSpeed * dt;
+      camPos.z += glideDir.z * glideSpeed * dt;
+    }
+
+    // Re-check ground contact after moving
+    groundY = sampleTerrainHeightAtWorld(camPos.x, camPos.z, SIZE);
+    if(WAVE_ON){ groundY += Math.sin(gTimeSec * WAVE_SPEED) * WAVE_AMP; }
+    const newFootY = groundY + EYE_HEIGHT;
+    if(camPos.y <= newFootY){
+      camPos.y = newFootY;
+      velY = 0;
+      isGrounded = true;
+    }
+  }
+
+  // Track prev Space state for edge detection
+  prevSpaceDown = spaceDown;
+
+  // While gliding, stamina should heal regardless of sprint key
+  if(isGliding){
+    const rec = (Math.abs(mx)+Math.abs(mz))>1e-4 ? STAMINA_RECOVER_MOVE : STAMINA_RECOVER_REST;
+    stamina = Math.min(1, stamina + rec * dt);
+  }
 }
 
 /*** ---------- Matrices ---------- ***/
@@ -696,6 +903,7 @@ function lookAt(eye, center, up){
 /*** ---------- Render Loop ---------- ***/
 let last = performance.now();
 let lastFrameTime = 0;
+let gTimeSec = 0; // global seconds timestamp for effects physics
 function frame(t){
   // FPS cap: skip frames to meet target cadence
   if(FPS_CAP_ENABLED){
@@ -704,6 +912,7 @@ function frame(t){
     lastFrameTime = t;
   }
   const dt = Math.min(0.033, (t-last)/1000); last = t;
+  gTimeSec = t*0.001;
   tick(dt);
   updateStatus();
   // no diorama tilt
@@ -723,7 +932,7 @@ function frame(t){
   gl.uniform3f(loc.u_camPos, camPos.x, camPos.y, camPos.z);
   gl.uniform1f(loc.u_maxDist, LAYER_MAX_DIST);
   gl.uniform1i(loc.u_layers, LAYERS);
-  gl.uniform2f(loc.u_res, canvas.width, canvas.height);
+  // u_res/u_outRes will be updated per-pass in the band render and comp steps
   gl.uniform1f(loc.u_time, t*0.001);
   gl.uniform1f(loc.u_strokePx, STROKE_PX);
   gl.uniform1f(loc.u_variation, VARIATION);
@@ -732,15 +941,23 @@ function frame(t){
   const lightDir = normalizeVec3([-0.6, -1.0, -0.4]); // coming from above-left
   gl.uniform3f(loc.u_lightDir, lightDir[0], lightDir[1], lightDir[2]);
   gl.uniform3f(loc.u_lightColor, 1.0, 1.0, 1.0);
-  gl.uniform1f(loc.u_ambient, 0.35);
+  gl.uniform1f(loc.u_ambient, 0.85);
+  // Outline uniforms
+  gl.uniform1i(loc.u_outlineOn, OUTLINE_ON ? 1 : 0);
+  gl.uniform1f(loc.u_outlineScale, OUTLINE_SCALE);
+  gl.uniform1f(loc.u_outlineIntensity, OUTLINE_INTENSITY);
+  gl.uniform1i(loc.u_outlineBand, OUTLINE_BAND);
   // Checker uniforms
   gl.uniform1f(loc.u_checkerSize, CHECKER_SIZE);
   gl.uniform1f(loc.u_checkerAlpha, CHECKER_ALPHA);
+  gl.uniform1i(loc.u_checkerScreen, CHECKER_SCREEN ? 0 : 1);
 
   // 1) Render each band to its texture (draw multiple wrapped tiles in a 3x3 grid)
   gl.bindVertexArray(vao);
   // Bind terrain buffers from terrain module (vbo/ibo already filled)
   if(typeof bindTerrainBuffers==='function') bindTerrainBuffers(gl);
+  // Use actual canvas dimensions for square screen-space checkers
+  const outW = canvas.width, outH = canvas.height;
   const passesToRender = (activeBand>=0) ? 1 : LAYERS;
   for(let p=0;p<passesToRender;p++){
     const bandIndexToRender = (activeBand>=0) ? activeBand : p;
@@ -756,6 +973,9 @@ function frame(t){
     }
     gl.clearColor(0.0,0.0,0.0,0.0);
     gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+    // Update per-target and output sizes for screen-space checkers
+    gl.uniform2f(loc.u_res, rw, rh);
+    gl.uniform2f(loc.u_outRes, outW, outH);
     gl.uniform1i(loc.u_activeBand, bandIndexToRender);
     const terrainIndexCount = (typeof getTerrainIndexCount==='function') ? getTerrainIndexCount() : indexCount;
     // draw 3x3 tiles around camera by translating model matrix
@@ -764,11 +984,17 @@ function frame(t){
       for(let oz of translations){
         const tx = ox * SIZE * 2.0;
         const tz = oz * SIZE * 2.0;
+        // Magic per-layer vertical wave offset
+        let waveY = 0.0;
+        if(WAVE_ON){
+          const phase = WAVE_PHASE * bandIndexToRender;
+          waveY = Math.sin((t*0.001)*WAVE_SPEED + phase) * WAVE_AMP;
+        }
         const modelT = new Float32Array([
           1,0,0,0,
           0,1,0,0,
           0,0,1,0,
-          tx,0,tz,1
+          tx,waveY,tz,1
         ]);
         gl.uniformMatrix4fv(loc.u_model,false,modelT);
         gl.drawElements(gl.TRIANGLES, terrainIndexCount, gl.UNSIGNED_INT, 0);
@@ -923,62 +1149,7 @@ function loadImage(url){
   }
 })();
 
-  // ----- Mobile Virtual Joysticks -----
-  const joyL = document.getElementById('joyL');
-  const joyR = document.getElementById('joyR');
-  const knobL = joyL ? joyL.querySelector('.knob') : null;
-  const knobR = joyR ? joyR.querySelector('.knob') : null;
-  let joyLActive=false, joyRActive=false;
-  let joyLVec={x:0,y:0}, joyRVec={x:0,y:0};
 
-  function setupJoystick(root, knob, onVec){
-    if(!root || !knob) return;
-    const radius = 80; // px
-    function updateFromEvent(e){
-      const t = ('touches' in e) ? e.touches[0] : e;
-      const rect = root.getBoundingClientRect();
-      const cx = rect.left + rect.width/2;
-      const cy = rect.top + rect.height/2;
-      let dx = t.clientX - cx;
-      let dy = t.clientY - cy;
-      const len = Math.hypot(dx,dy);
-      const maxLen = radius;
-      const cl = Math.min(1, len/maxLen);
-      if(len>0){ dx = dx/len*cl; dy = dy/len*cl; } else { dx=0; dy=0; }
-      const kx = dx*maxLen, ky = dy*maxLen;
-      knob.style.transform = `translate(calc(-50% + ${kx}px), calc(-50% + ${ky}px))`;
-      onVec({x:dx,y:dy});
-    }
-    function end(){ knob.style.transform='translate(-50%, -50%)'; onVec({x:0,y:0}); root.classList.remove('active'); }
-    if(window.PointerEvent){
-      root.addEventListener('pointerdown', e=>{ root.setPointerCapture(e.pointerId); root.classList.add('active'); updateFromEvent(e); });
-      root.addEventListener('pointermove', e=>{ if(root.classList.contains('active')) updateFromEvent(e); });
-      root.addEventListener('pointerup', end);
-      root.addEventListener('pointercancel', end);
-    } else {
-      root.addEventListener('touchstart', e=>{ root.classList.add('active'); updateFromEvent(e); e.preventDefault(); }, {passive:false});
-      root.addEventListener('touchmove', e=>{ if(root.classList.contains('active')) updateFromEvent(e); e.preventDefault(); }, {passive:false});
-      root.addEventListener('touchend', end, {passive:false});
-      root.addEventListener('touchcancel', end, {passive:false});
-    }
-  }
-
-  setupJoystick(joyL, knobL, v=>{ joyLVec=v; joyLActive = (v.x!==0||v.y!==0); });
-  setupJoystick(joyR, knobR, v=>{ joyRVec=v; joyRActive = (v.x!==0||v.y!==0); });
-
-  function isTouchLike(){
-    const coarse = window.matchMedia ? window.matchMedia('(pointer: coarse)').matches : false;
-    return coarse || ('ontouchstart' in window) || (navigator.maxTouchPoints && navigator.maxTouchPoints>0);
-  }
-  function ensureJoystickVisibility(){
-    if(!joyL||!joyR) return;
-    if(isTouchLike()){
-      joyL.style.display = 'block';
-      joyR.style.display = 'block';
-    }
-  }
-  ensureJoystickVisibility();
-  addEventListener('resize', ensureJoystickVisibility);
 </script>
 </body>
 </html>
