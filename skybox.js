@@ -129,6 +129,9 @@ function drawSkyBackground(gl, aspect, fovy, getDir, canvas, SKYBOX_URL_UNUSED){
     gl.bindTexture(gl.TEXTURE_2D, skyTex);
     gl.uniform1i(skyLoc.u_sky, 0);
   }
+  // Draw sky behind everything and ensure it presents before terrain
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, canvas.width, canvas.height);
   gl.disable(gl.DEPTH_TEST);
   gl.disable(gl.BLEND);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);

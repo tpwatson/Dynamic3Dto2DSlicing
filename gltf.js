@@ -32,6 +32,39 @@
     return { glType, compSize, numComp, count: accessor.count, byteOffset: accessor.byteOffset || 0 };
   }
 
+  // Minimal mat4 helpers (column-major)
+  function mat4Identity(){ return new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]); }
+  function mat4Multiply(a,b){
+    const out = new Float32Array(16);
+    for(let c=0;c<4;c++){
+      const ai0=a[0+c*4], ai1=a[1+c*4], ai2=a[2+c*4], ai3=a[3+c*4];
+      out[0+c*4] = ai0*b[0] + ai1*b[4] + ai2*b[8]  + ai3*b[12];
+      out[1+c*4] = ai0*b[1] + ai1*b[5] + ai2*b[9]  + ai3*b[13];
+      out[2+c*4] = ai0*b[2] + ai1*b[6] + ai2*b[10] + ai3*b[14];
+      out[3+c*4] = ai0*b[3] + ai1*b[7] + ai2*b[11] + ai3*b[15];
+    }
+    return out;
+  }
+  function quatToMat4(qx,qy,qz,qw){
+    const x=qx,y=qy,z=qz,w=qw;
+    const x2=x+x, y2=y+y, z2=z+z;
+    const xx=x*x2, xy=x*y2, xz=x*z2;
+    const yy=y*y2, yz=y*z2, zz=z*z2;
+    const wx=w*x2, wy=w*y2, wz=w*z2;
+    return new Float32Array([
+      1-(yy+zz), xy+wz,     xz-wy,     0,
+      xy-wz,     1-(xx+zz), yz+wx,     0,
+      xz+wy,     yz-wx,     1-(xx+yy), 0,
+      0,         0,         0,         1
+    ]);
+  }
+  function fromTRS(t,r,s){
+    const T = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, (t? t[0]:0), (t? t[1]:0), (t? t[2]:0), 1]);
+    const R = r ? quatToMat4(r[0],r[1],r[2],r[3]) : mat4Identity();
+    const S = new Float32Array([ (s? s[0]:1),0,0,0, 0,(s? s[1]:1),0,0, 0,0,(s? s[2]:1),0, 0,0,0,1 ]);
+    return mat4Multiply(T, mat4Multiply(R, S));
+  }
+
   function makeVaoForPrimitive(gl, programLoc, gltf, buffers, primitive){
     // programLoc: { a_pos: 0, a_col: 1, a_norm: 2 }
     const vao = gl.createVertexArray();
@@ -88,7 +121,7 @@
       const emissive = mat.emissiveFactor || [0,0,0];
       material = { base, metallic, roughness, emissive };
     }
-    const draw = { vao, indexCount: iInf.count, indexType: iInf.glType, indexOffsetBytes: iInf.byteOffset, mode, material };
+    const draw = { vao, indexCount: iInf.count, indexType: iInf.glType, indexOffsetBytes: iInf.byteOffset, mode, material, nodeMatrix: mat4Identity() };
     gl.bindVertexArray(null);
     return draw;
   }
@@ -123,16 +156,30 @@
       const bin = binDatas[view.buffer];
       buffers[i] = createBufferFromView(gl, bin, view);
     }
-    // Build drawables for all mesh primitives
+    // Traverse scene graph to build drawables with node transforms
     const drawables = [];
-    if(Array.isArray(gltf.meshes)){
-      for(const mesh of gltf.meshes){
+    function buildForNode(nodeIdx, parentMat){
+      const node = gltf.nodes[nodeIdx] || {};
+      let localMat = null;
+      if(node.matrix && node.matrix.length === 16){ localMat = new Float32Array(node.matrix); }
+      else { localMat = fromTRS(node.translation, node.rotation, node.scale); }
+      const worldMat = mat4Multiply(parentMat, localMat);
+      if(typeof node.mesh === 'number' && gltf.meshes && gltf.meshes[node.mesh]){
+        const mesh = gltf.meshes[node.mesh];
         for(const prim of mesh.primitives){
           const draw = makeVaoForPrimitive(gl, programLoc, gltf, buffers, prim);
+          draw.nodeMatrix = worldMat;
           drawables.push(draw);
         }
       }
+      if(Array.isArray(node.children)){
+        for(const c of node.children){ buildForNode(c, worldMat); }
+      }
     }
+    const sceneIndex = (typeof gltf.scene === 'number') ? gltf.scene : 0;
+    const scene = (gltf.scenes && gltf.scenes[sceneIndex]) || {};
+    const roots = Array.isArray(scene.nodes) ? scene.nodes : [];
+    for(const nIdx of roots){ buildForNode(nIdx, mat4Identity()); }
     const bounds = computeSceneBounds(gltf);
     return { drawables, bounds };
   }

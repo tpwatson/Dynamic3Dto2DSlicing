@@ -29,7 +29,7 @@
 <body>
 <div id="uiToggle" class="btn">Hide UI (H)</div>
 <div id="ui">
-  <div><b>Layered Painting</b> — WASD to move, mouse to look. Click canvas to lock cursor.</div>
+  <div><b>Airplane</b> — W/S throttle, A/D roll, Arrow Up/Down pitch, Shift afterburner. Plane starts on ground.</div>
   <div>Layers: 14 • Stroke size: 8px • 5% random variation</div>
   <div id="status">loading heightmap…</div>
   <div style="margin-top:6px"><span class="btn" id="recenter">Recenter (R)</span></div>
@@ -37,7 +37,7 @@
     <label>View Far <span class="val" id="v_viewFar"></span></label>
     <input id="ctl_viewFar" type="range" min="50" max="50000" step="10">
     <label>Layer Max Dist <span class="val" id="v_layerMax"></span></label>
-    <input id="ctl_layerMax" type="range" min="50" max="20000" step="10">
+    <input id="ctl_layerMax" type="range" min="50" max="50000" step="10">
     <label>Stroke Px <span class="val" id="v_stroke"></span></label>
     <input id="ctl_stroke" type="range" min="2" max="48" step="1">
     <label>Variation <span class="val" id="v_var"></span></label>
@@ -79,10 +79,10 @@
     <input id="ctl_asciiDark" type="range" min="0" max="1" step="0.01">
   </div>
 </div>
-  <div id="bandUi" style="margin-top:8px">
+  <!-- <div id="bandUi" style="margin-top:8px">
     <label>Preview Band (isolated)</label>
     <div id="bands"></div>
-  </div>
+  </div> -->
 <canvas id="gl"></canvas>
 <img id="mirrorOverlay" src="blackmirror.png" alt="" style="display:none" />
 <div id="joyL" class="joy"><div class="knob"></div></div>
@@ -104,9 +104,13 @@ If you want to use your file instead, e.g. "heightmap.png", put it in same folde
 const HEIGHTMAP_DATA_URL = "heightmap.png";
 */
 // Equirectangular sky texture
-const SKYBOX_URL = `skyboxnight.jpg`;
+const SKYBOX_URL = `skybox1.jpg`;
 const DEBUG_DIRECT_DRAW = false; // disable direct-draw to avoid duplicate plane renders
-const PLAYER_YAW_OFFSET = Math.PI; // face away from camera by default
+const PLAYER_YAW_OFFSET = 0.0; // control yaw purely via airplane state
+// These are only backups; auto-alignment below determines the proper basis
+let PLAYER_MODEL_YAW_FIX = 0.0;
+let PLAYER_MODEL_PITCH_FIX = 0.0;
+let PLAYER_MODEL_ROLL_FIX = 0.0;
 
 // Generate a procedural heightmap instead of loading external files
 function generateHeightmap(width, height) {
@@ -169,16 +173,28 @@ const HEIGHT_SCALE = 1600.0; // how tall the white peaks get
 const FOVY = 60 * Math.PI / 180;
 
 // Movement
-const SPEED = 10.0;         // base walk speed (m/s)
-const LOOK_SENS = 0.0023;   // mouse
-const KEY_LOOK_SPEED = 1.8; // rad/sec for Arrow keys look
-const JUMP = 8.0;           // simple hop
+const LOOK_SENS = 0.0023;   // mouse (disabled in airplane mode)
+const KEY_LOOK_SPEED = 1.8; // not used in airplane mode
 const GRAV = 25.0;
-const EYE_HEIGHT = 2.0;     // player eye height above terrain
-const GLIDE_GRAVITY_MULT = 0.25; // gravity multiplier while holding Space in air
-const MAX_FALL_SPEED = 60.0;     // terminal velocity (m/s)
-const GLIDE_ACCEL = 102.0;        // horizontal acceleration while gliding (m/s^2)
-const GLIDE_MAX_SPEED = 100000000.0;   // max horizontal glide speed (m/s)
+const EYE_HEIGHT = 2.0;     // not used in airplane mode
+// --- Airplane sim constants ---
+const AFTERBURNER_MULT = 3.0;     // Shift
+const THRUST_BASE = 140.0;        // units/sec^2 at full throttle
+const DRAG_COEFF = 0.02;          // quadratic drag
+const MAX_SPEED = 380.0;          // soft cap; drag prevents exceeding much
+const TAKEOFF_SPEED = 45.0;       // must exceed and pitch up to leave ground
+const PITCH_RATE = 0.9;           // rad/sec (Arrow Up/Down)
+const ROLL_RATE  = 1.8;           // rad/sec (A/D)
+const MAX_PITCH  = 0.6;           // ~34° up/down
+const MAX_ROLL   = 1.2;           // ~69°
+const BANK_TURN_RATE = 2.8;       // yaw rad/sec contribution at full bank (scaled by speed)
+const MIN_TURN_RATE = 0.7;        // base yaw even at low speeds so A/D always changes heading
+const ROLL_RETURN_RATE = 2.2;     // rad/sec return-to-level when no roll input
+const PLANE_CLEARANCE = 3.0;      // meters above terrain to consider "on ground"
+const CAMERA_FOLLOW_DIST = 70.0;  // meters behind plane
+const CAMERA_FOLLOW_HEIGHT = 20.0;// meters above plane along up vector
+const CAMERA_SPRING = 6.0;        // higher = snappier follow
+const CAMERA_ORIENT_SPRING = 8.0; // smoothing for yaw/pitch follow
 // Frame rate cap (testing)
 const FPS_CAP_ENABLED = true;
 const FPS_CAP = 30; // target FPS when cap is enabled
@@ -195,12 +211,12 @@ const STAMINA_RECOVER_MOVE = 1.0 / 90.0;  // full recover in ~90s if walking
 
 // Painterly / layers
 const LAYERS = 14;
-let VIEW_FAR = 13520.0;          // camera far plane (true view distance)
-let LAYER_MAX_DIST = 3860.0;    // stylization range used for banding
-let STROKE_PX = 2.0;          // base “pixel/brush” size (screen-space)
-let VARIATION = 0.0;         // 5% size variation
+let VIEW_FAR = 50000.0;          // extend far plane for full terrain visibility
+let LAYER_MAX_DIST = 50000.0;    // match view distance so all bands cover horizon
+let STROKE_PX = 4.0;          // base “pixel/brush” size (screen-space)
+let VARIATION = 0.05;         // subtle variation
 let CHECKER_SIZE = 4.0;      // world units per checker cell
-let CHECKER_ALPHA = 0.04;      // overlay opacity (0..1)
+let CHECKER_ALPHA = 0.0;      // disable overlay for maximum clarity
  let CHECKER_SCREEN = true;     // when true, draw checker in screen-space per layer
 // Outline defaults
 let OUTLINE_ON = true;
@@ -208,7 +224,7 @@ let OUTLINE_SCALE = 4;       // sensitivity multiplier (higher catches more edge
 let OUTLINE_INTENSITY = 0.25;   // 0..1, how black the edge goes
 let OUTLINE_BAND = 0;          // outline only the nearest band by default
 let LAYER_PASSES = 14;         // how many bands to render (near-first)
-let RES_SCALE = 0.25;           // 1.0 = full res, <1 = render to smaller FBOs
+let RES_SCALE = 1.0;           // render bands at full resolution
 let LOCK_LAYER_TO_VIEW = true; // keep LAYER_MAX_DIST tracking VIEW_FAR
 // Magic wave effect
 let WAVE_ON = false;
@@ -362,29 +378,30 @@ function syncUI(){
 syncUI();
 
 // Build band preview buttons 0..13 and an All toggle
-function buildBandButtons(){
-  bandsDiv.innerHTML = '';
-  const btnAll = document.createElement('span');
-  btnAll.className = 'btn';
-  btnAll.textContent = 'All';
-  btnAll.onclick = ()=>{ activeBand = -1; };
-  bandsDiv.appendChild(btnAll);
-  for(let i=0;i<LAYERS;i++){
-    const b = document.createElement('span');
-    b.className = 'btn';
-    b.style.marginLeft = '4px';
-    b.textContent = String(i+1);
-    b.onclick = ()=>{ activeBand = i; };
-    bandsDiv.appendChild(b);
-  }
-}
-buildBandButtons();
+// function buildBandButtons(){
+//   bandsDiv.innerHTML = '';
+//   const btnAll = document.createElement('span');
+//   btnAll.className = 'btn';
+//   btnAll.textContent = 'All';
+//   btnAll.onclick = ()=>{ activeBand = -1; };
+//   bandsDiv.appendChild(btnAll);
+//   for(let i=0;i<LAYERS;i++){
+//     const b = document.createElement('span');
+//     b.className = 'btn';
+//     b.style.marginLeft = '4px';
+//     b.textContent = String(i+1);
+//     b.onclick = ()=>{ activeBand = i; };
+//     bandsDiv.appendChild(b);
+//   }
+// }
+// buildBandButtons();
 
 // Optional: stamina readout in status line
 function updateStatus(){
   if(!statusEl) return;
-  const pct = Math.round(stamina*100);
-  statusEl.textContent = `stamina ${pct}%`;
+  const spd = (plane && plane.speed) ? plane.speed : 0;
+  const alt = (plane && plane.pos) ? (plane.pos.y - sampleTerrainHeightAtWorld(plane.pos.x, plane.pos.z, SIZE)) : 0;
+  statusEl.textContent = `speed ${spd.toFixed(0)} m/s — altitude ${alt.toFixed(0)} m`;
 }
 
 ctlViewFar.addEventListener('input', ()=>{ VIEW_FAR = Number(ctlViewFar.value); vViewFar.textContent = VIEW_FAR.toFixed(0); });
@@ -396,7 +413,7 @@ ctlHScale.addEventListener('change', ()=>{ // rebuild terrain with new vertical 
   vHScale.textContent = HEIGHT_SCALE.toFixed(0);
   statusEl.textContent = 'rebuilding terrain…';
   // Re-load and rebuild to apply new scale consistently
-  loadImage(FINAL_DATA_URL).then(img=>{ buildTerrainFromImage(img); statusEl.textContent='ready.'; });
+  loadImage(FINAL_DATA_URL).then(img=>{ buildTerrainFromImage(gl, img, GRID, SIZE, HEIGHT_SCALE); statusEl.textContent='ready.'; recenter(); });
 });
 ctlChkSize.addEventListener('input', ()=>{ CHECKER_SIZE = Number(ctlChkSize.value); vChkSize.textContent = CHECKER_SIZE.toFixed(0); });
 ctlChkAlpha.addEventListener('input', ()=>{ CHECKER_ALPHA = Number(ctlChkAlpha.value); vChkAlpha.textContent = CHECKER_ALPHA.toFixed(2); });
@@ -592,11 +609,11 @@ float bandIndex(float d, float maxD, float N){
     return;
   }
 
-  // Base color from palette by distance layer
-  vec3 layerColor = PALETTE[int(idx)];
-  // Lambert lighting
+  // Base color from palette by distance layer (slightly brighter palette)
+  vec3 layerColor = min(PALETTE[int(idx)] * 1.25, vec3(1.0));
+  // Brighter mid-day lighting
   float lambert = max(dot(normalize(v_norm), normalize(-u_lightDir)), 0.0);
-  float lightIntensity = clamp(u_ambient + lambert, 0.0, 1.5);
+  float lightIntensity = clamp(u_ambient + lambert * 1.2, 0.0, 2.0);
   vec3 color = layerColor * lightIntensity * u_lightColor;
 
   // Checkerboard: either world-space or screen-space per band
@@ -654,7 +671,7 @@ float bandIndex(float d, float maxD, float N){
 
   // composite: each layer paints only inside its blotch cells. We intentionally
   // keep coverage below 1.0 (especially for near bands) so deeper bands remain visible.
-  vec3 paper = vec3(0.0,0.0,0.0);
+  vec3 paper = vec3(0.06,0.07,0.08);
   vec3 painted = mix(color, color*0.85, 0.3 + 0.2*r); // slight variation per stamp
 
   // fake multi-stroke feel by modulating with a second threshold
@@ -751,21 +768,16 @@ let activeBand = -1; // -1 = all
 // Implemented in terrain.js
 
 /*** ---------- Camera / Controls ---------- ***/
-let camPos = {x:0, y:30, z:-SIZE*0.9};
-let yaw = 0, pitch = 0;
-let velY = 0;
-let isGrounded = false;
-let prevSpaceDown = false;
-let isGliding = false;
-let glideSpeed = 0.0;
-let glideDir = {x:0, z:1};
-let lastMoveDir = {x:0, z:1};
+let camPos = {x:0, y:60, z:-SIZE*0.8};
+let yaw = 0, pitch = 0; // maintained from camera target each frame
+// Airplane state
+let plane = { pos:{x:0,y:0,z:0}, yaw:0, pitch:0, roll:0, speed:0, throttle:0, onGround:true };
 // Diorama card tilt (radians)
 let cardTiltX = 0, cardTiltY = 0;
 let cardTiltXTarget = 0, cardTiltYTarget = 0;
 // Sprint/stamina state
-let stamina = 1.0;             // 0..1
-let sprintHoldTime = 0.0;      // seconds continuously holding sprint
+let stamina = 1.0;             // unused (legacy UI)
+let sprintHoldTime = 0.0;
 let isSprinting = false;
 // Player model (glTF)
 let playerModel = { ready:false, drawables:[], bounds:null, scale:1 };
@@ -790,24 +802,41 @@ addEventListener('keydown', e=>{
 });
 
 function recenter(){
-  camPos = {x:0, y:60, z:-SIZE*0.9};
-  yaw = 0; pitch = 0; velY = 0;
-  // snap to terrain if available
-  const gy = sampleTerrainHeightAtWorld(camPos.x, camPos.z, SIZE);
-  camPos.y = gy + EYE_HEIGHT;
-  // Initialize player straight ahead of camera at a fixed offset, facing current camera yaw
-  const f = getDir();
-  playerEntity.pos.x = camPos.x + f.x * 30.0;
-  playerEntity.pos.z = camPos.z + f.z * 30.0;
-  playerEntity.pos.y = sampleTerrainHeightAtWorld(playerEntity.pos.x, playerEntity.pos.z, SIZE) + 10.0;
-  playerEntity.yaw = yaw;
+  // Place plane at world origin on ground, facing +Z
+  const gy = sampleTerrainHeightAtWorld(0, 0, SIZE);
+  plane.pos = { x: 0, y: gy + PLANE_CLEARANCE, z: 0 };
+  plane.yaw = 0;
+  plane.pitch = 0;
+  plane.roll = 0;
+  plane.speed = 0;
+  plane.throttle = 0;
+  plane.onGround = true;
+  // Camera behind plane
+  const fwd = forwardFromEuler(plane.yaw, plane.pitch);
+  const basis = basisFromEuler(plane.yaw, plane.pitch, plane.roll);
+  const up = upFromBasis(basis);
+  camPos = {
+    x: plane.pos.x - fwd.x * CAMERA_FOLLOW_DIST + up.x * CAMERA_FOLLOW_HEIGHT,
+    y: plane.pos.y - fwd.y * CAMERA_FOLLOW_DIST + up.y * CAMERA_FOLLOW_HEIGHT,
+    z: plane.pos.z - fwd.z * CAMERA_FOLLOW_DIST + up.z * CAMERA_FOLLOW_HEIGHT,
+  };
+  // Sync camera angles to look at plane
+  const toTarget = { x: plane.pos.x - camPos.x, y: plane.pos.y - camPos.y, z: plane.pos.z - camPos.z };
+  const l = Math.hypot(toTarget.x, toTarget.y, toTarget.z) || 1;
+  const dir = { x: toTarget.x/l, y: toTarget.y/l, z: toTarget.z/l };
+  yaw = Math.atan2(dir.x, -dir.z);
+  pitch = Math.asin(-dir.y);
+  // Player entity mirrors plane for renderer
+  playerEntity.pos = { x: plane.pos.x, y: plane.pos.y, z: plane.pos.z };
+  playerEntity.yaw = plane.yaw + PLAYER_YAW_OFFSET;
   playerEntity.initialized = true;
 }
 recenterBtn.onclick = recenter;
 
 canvas.addEventListener('click', ()=> canvas.requestPointerLock());
+const MOUSE_LOOK_ENABLED = false; // disabled for airplane mode
 addEventListener('mousemove', e=>{
-  if(document.pointerLockElement === canvas){
+  if(MOUSE_LOOK_ENABLED && document.pointerLockElement === canvas){
     yaw += e.movementX * LOOK_SENS;
     pitch += e.movementY * LOOK_SENS;
     pitch = Math.max(-1.2, Math.min(1.2, pitch));
@@ -829,164 +858,191 @@ function getRight(){
   return { x: cy, y: 0, z: sy };
 }
 
+function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
+function lerpAngle(a, b, t){ let d = ((b - a + Math.PI) % (2*Math.PI)) - Math.PI; return a + d * t; }
+function basisFromEuler(yawR, pitchR, rollR){
+  const cy=Math.cos(yawR), sy=Math.sin(yawR);
+  const cp=Math.cos(pitchR), sp=Math.sin(pitchR);
+  const cz=Math.cos(rollR),  sz=Math.sin(rollR);
+  // R = Ry * Rx * Rz
+  // Columns are transformed basis vectors
+  // Start with Rz
+  const Xz = {x:cz, y:sz, z:0};
+  const Yz = {x:-sz, y:cz, z:0};
+  const Zz = {x:0, y:0, z:1};
+  // Apply Rx
+  function rx(v){ return { x: v.x, y: v.y*cp - v.z*sp, z: v.y*sp + v.z*cp }; }
+  const Xxz = rx(Xz), Yxz = rx(Yz), Zxz = rx(Zz);
+  // Apply Ry
+  function ry(v){ return { x: v.x*cy + v.z*sy, y: v.y, z: -v.x*sy + v.z*cy }; }
+  const X = ry(Xxz), Y = ry(Yxz), Z = ry(Zxz);
+  return { X, Y, Z };
+}
+function modelMatrixFromBasis(pos, basis, scale){
+  const sc = scale;
+  return new Float32Array([
+    basis.X.x*sc, basis.X.y*sc, basis.X.z*sc, 0,
+    basis.Y.x*sc, basis.Y.y*sc, basis.Y.z*sc, 0,
+    basis.Z.x*sc, basis.Z.y*sc, basis.Z.z*sc, 0,
+    pos.x,        pos.y,        pos.z,        1
+  ]);
+}
+// 3x3 alignment matrix that maps model-local axes to our world axes; default identity
+let MODEL_ALIGN = [1,0,0, 0,1,0, 0,0,1]; // column-major 3x3
+function mulBasisByMat3(b, m){
+  // m is 3x3 column-major
+  function col(i){ return { x:m[i*3+0], y:m[i*3+1], z:m[i*3+2] }; }
+  const c0 = col(0), c1 = col(1), c2 = col(2);
+  function comb(c){ return { x: b.X.x*c.x + b.Y.x*c.y + b.Z.x*c.z,
+                             y: b.X.y*c.x + b.Y.y*c.y + b.Z.y*c.z,
+                             z: b.X.z*c.x + b.Y.z*c.y + b.Z.z*c.z }; }
+  const X = normalize3(comb(c0));
+  const Y = normalize3(comb(c1));
+  const Z = normalize3(comb(c2));
+  return { X, Y, Z };
+}
+function getPlaneModelMatrix(){
+  // Stable basis from forward (yaw+pitch) and world up; then apply bank (roll) and local axis fixes.
+  const fwd0 = normalize3(forwardFromEulerPlane(plane.yaw, plane.pitch));
+  let right0 = cross3({x:0,y:1,z:0}, fwd0);
+  const rl = Math.hypot(right0.x, right0.y, right0.z);
+  if(rl < 1e-4){ right0 = {x:1,y:0,z:0}; }
+  right0 = normalize3(right0);
+  let up0 = normalize3(cross3(fwd0, right0));
+  // Apply roll around forward
+  const bank = plane.roll;
+  const right1 = rotateAroundAxis(right0, fwd0, bank + PLAYER_MODEL_ROLL_FIX);
+  let up1 = normalize3(cross3(fwd0, right1));
+  // Apply pitch fix around new right
+  const fwd2 = rotateAroundAxis(fwd0, right1, PLAYER_MODEL_PITCH_FIX);
+  up1 = normalize3(cross3(fwd2, right1));
+  // Apply yaw fix around up
+  const right2 = rotateAroundAxis(right1, up1, PLAYER_MODEL_YAW_FIX + PLAYER_YAW_OFFSET);
+  const fwd3 = normalize3(cross3(right2, up1));
+  const sc = playerModel.scale * 0.6;
+  const bodyBasis = { X: right2, Y: up1, Z: fwd3 };
+  const alignedBasis = mulBasisByMat3(bodyBasis, MODEL_ALIGN);
+  return modelMatrixFromBasis(plane.pos, alignedBasis, sc);
+}
+function forwardFromEuler(yawR, pitchR){
+  const cy=Math.cos(yawR), sy=Math.sin(yawR);
+  const cp=Math.cos(pitchR), sp=Math.sin(pitchR);
+  return { x: sy*cp, y: -sp, z: -cy*cp };
+}
+// For airplane physics, positive pitch should raise the nose and produce positive vertical component
+function forwardFromEulerPlane(yawR, pitchR){
+  const cy=Math.cos(yawR), sy=Math.sin(yawR);
+  const cp=Math.cos(pitchR), sp=Math.sin(pitchR);
+  return { x: sy*cp, y: sp, z: -cy*cp };
+}
+function upFromBasis(basis){ return { x: basis.Y.x, y: basis.Y.y, z: basis.Y.z }; }
+function normalize3(v){ const l=Math.hypot(v.x,v.y,v.z)||1; return {x:v.x/l,y:v.y/l,z:v.z/l}; }
+function cross3(a,b){ return { x: a.y*b.z - a.z*b.y, y: a.z*b.x - a.x*b.z, z: a.x*b.y - a.y*b.x }; }
+function dot3(a,b){ return a.x*b.x + a.y*b.y + a.z*b.z; }
+function rotateAroundAxis(v, axis, angle){
+  const u = normalize3(axis);
+  const c = Math.cos(angle), s = Math.sin(angle);
+  const dot = dot3(u, v);
+  return {
+    x: v.x*c + (u.y*v.z - u.z*v.y)*s + u.x*dot*(1-c),
+    y: v.y*c + (u.z*v.x - u.x*v.z)*s + u.y*dot*(1-c),
+    z: v.z*c + (u.x*v.y - u.y*v.x)*s + u.z*dot*(1-c),
+  };
+}
+
 function tick(dt){
-  const f = getDir();
-  const r = getRight();
-  let mx=0,my=0,mz=0;
-  if(keys['w']){ mx += f.x; my += f.y; mz += f.z; }
-  if(keys['s']){ mx -= f.x; my -= f.y; mz -= f.z; }
-  if(keys['a']){ mx -= r.x; mz -= r.z; }
-  if(keys['d']){ mx += r.x; mz += r.z; }
-  // Mobile left joystick: forward/back/strafe
-  if(joyLActive){
-    mx += (f.x* -joyLVec.y) + (r.x* joyLVec.x);
-    mz += (f.z* -joyLVec.y) + (r.z* joyLVec.x);
-  }
-  // Sprint mechanics (Shift key or right-joystick push-in optional later)
-  const sprintKey = keys['shift'] === true;
-  const moving = (Math.abs(mx) + Math.abs(mz)) > 1e-4;
-  if(sprintKey && moving && stamina > 0){
-    isSprinting = true;
-    sprintHoldTime += dt;
-    stamina = Math.max(0, stamina - STAMINA_DRAIN_PER_SEC * dt);
+  // --- Inputs ---
+  // Throttle
+  if(keys['w']) plane.throttle += 0.8*dt;
+  if(keys['s']) plane.throttle -= 0.8*dt;
+  plane.throttle = clamp(plane.throttle, 0, 1);
+  const afterburner = keys['shift'] === true;
+  const thrust = THRUST_BASE * plane.throttle * (afterburner ? AFTERBURNER_MULT : 1.0);
+  // Pitch
+  if(keys['arrowdown']) plane.pitch += PITCH_RATE * dt; // nose up
+  if(keys['arrowup'])   plane.pitch -= PITCH_RATE * dt; // nose down
+  plane.pitch = clamp(plane.pitch, -MAX_PITCH, MAX_PITCH);
+  // Roll with auto-return when no input
+  const rollInput = (keys['d']? 1 : 0) + (keys['a']? -1 : 0);
+  if(rollInput !== 0){
+    plane.roll += rollInput * ROLL_RATE * dt;
   } else {
-    isSprinting = false;
-    sprintHoldTime = 0;
-    // recover slower while walking, faster while resting
-    const rec = moving ? STAMINA_RECOVER_MOVE : STAMINA_RECOVER_REST;
-    stamina = Math.min(1, stamina + rec * dt);
+    // spring back to level
+    const k = Math.min(1.0, ROLL_RETURN_RATE * dt);
+    plane.roll += (-plane.roll) * k;
   }
+  plane.roll = clamp(plane.roll, -MAX_ROLL, MAX_ROLL);
 
-  // Determine speed
-  let curSpeed = SPEED;
-  if(isSprinting){
-    if(sprintHoldTime <= SPRINT_TOP_DURATION){
-      curSpeed = SPRINT_SPEED_TOP;
-    } else if(sprintHoldTime <= SPRINT_TOP_DURATION + SPRINT_LONG_DURATION){
-      curSpeed = SPRINT_SPEED_LONG;
+  // --- Physics ---
+  // Speed integration with drag
+  const drag = DRAG_COEFF * plane.speed * plane.speed;
+  plane.speed += (thrust - drag) * dt;
+  plane.speed = clamp(plane.speed, 0, MAX_SPEED);
+
+  // Banked turning (yaw induced by roll). Ensure a base yaw rate even at low speeds.
+  const speedNorm = clamp(plane.speed / MAX_SPEED, 0, 1);
+  const turnRate = MIN_TURN_RATE + BANK_TURN_RATE * speedNorm; // rad/sec at sin(roll)=1
+  plane.yaw += Math.sin(plane.roll) * turnRate * dt;
+
+  // Forward vector in world (plane orientation drives movement; camera is passive)
+  const fwd = forwardFromEulerPlane(plane.yaw, plane.pitch);
+  // Move
+  plane.pos.x += fwd.x * plane.speed * dt;
+  plane.pos.z += fwd.z * plane.speed * dt;
+  // Altitude and takeoff/landing
+  const groundYBase = sampleTerrainHeightAtWorld(plane.pos.x, plane.pos.z, SIZE);
+  const groundY = WAVE_ON ? (groundYBase + Math.sin(gTimeSec * WAVE_SPEED) * WAVE_AMP) : groundYBase;
+  if(plane.onGround){
+    plane.pos.y = groundY + PLANE_CLEARANCE;
+    // Allow takeoff once fast enough and pitching up
+    if(plane.speed > TAKEOFF_SPEED && plane.pitch > 0.08){ plane.onGround = false; }
+    // Auto-damp roll while on ground
+    plane.roll *= Math.max(0, 1 - 4.0*dt);
     } else {
-      // decay linearly from SPRINT_SPEED_LONG to 0 over SPRINT_DECAY_DURATION
-      const t = Math.min(1, (sprintHoldTime - (SPRINT_TOP_DURATION + SPRINT_LONG_DURATION)) / SPRINT_DECAY_DURATION);
-      curSpeed = SPRINT_SPEED_LONG * (1 - t);
-    }
-    // If stamina is zero, clamp speed down further
-    if(stamina <= 0){ curSpeed = Math.min(curSpeed, SPEED * 0.25); }
-  }
-
-  // Arrow keys for camera look (works well over remote desktop)
-  if(keys['arrowleft']){ yaw -= KEY_LOOK_SPEED * dt; }
-  if(keys['arrowright']){ yaw += KEY_LOOK_SPEED * dt; }
-  if(keys['arrowup']){ pitch -= KEY_LOOK_SPEED * dt; }
-  if(keys['arrowdown']){ pitch += KEY_LOOK_SPEED * dt; }
-  // Mobile right joystick: camera look
-  if(joyRActive){
-    const lookRate = 1.8; // rad/sec at full deflection
-    yaw += joyRVec.x * lookRate * dt;
-    pitch += -joyRVec.y * lookRate * dt;
-  }
-  pitch = Math.max(-1.2, Math.min(1.2, pitch));
-  // Compute intended flat movement direction (used for glide heading capture)
-  const moveLen = Math.hypot(mx, mz);
-  if(moveLen > 1e-4){
-    lastMoveDir.x = mx / moveLen;
-    lastMoveDir.z = mz / moveLen;
-  }
-
-  const len = Math.hypot(mx,my,mz) || 1;
-  camPos.x += (mx/len)*curSpeed*dt;
-  camPos.z += (mz/len)*curSpeed*dt;
-
-  // Update player yaw to align with camera yaw, but keep its world position fixed
-  if(playerEntity.initialized){
-    playerEntity.yaw = yaw + PLAYER_YAW_OFFSET;
-    // Keep the plane hovering above terrain at its position
-    const gy = sampleTerrainHeightAtWorld(playerEntity.pos.x, playerEntity.pos.z, SIZE);
-    playerEntity.pos.y = gy + 10.0;
-  }
-
-  // --- Vertical physics: jump / gravity / glide ---
-  // Base ground height (include wave of nearest band so player rides it when grounded)
-  let groundY = sampleTerrainHeightAtWorld(camPos.x, camPos.z, SIZE);
-  if(WAVE_ON){
-    groundY += Math.sin(gTimeSec * WAVE_SPEED) * WAVE_AMP;
-  }
-
-  const spaceDown = (keys[' '] === true) || (keys['space'] === true);
-
-  // Determine grounded status (tolerate tiny epsilon)
-  const footY = groundY + EYE_HEIGHT;
-  if(camPos.y <= footY + 0.01){
-    // Snap to ground and reset when landing
-    camPos.y = footY;
-    if(velY < 0) velY = 0;
-    isGrounded = true;
-  } else {
-    isGrounded = false;
-  }
-
-  // Jump on rising edge of Space while grounded
-  if(isGrounded && spaceDown && !prevSpaceDown){
-    velY = JUMP;
-    isGrounded = false;
-    isGliding = false;
-  }
-
-  // Apply gravity if airborne
-  if(!isGrounded){
-    // Enter/maintain glide while holding space
-    if(spaceDown){
-      // On first frame of glide, capture heading and initial speed from current horizontal velocity
-      if(!isGliding){
-        // Estimate current horizontal speed from inputs: curSpeed already applied this frame
-        const vx = (mx/len)*curSpeed; const vz = (mz/len)*curSpeed;
-        const vlen = Math.hypot(vx, vz);
-        glideSpeed = vlen;
-        // If no input, use lastMoveDir heading; otherwise use current intended heading
-        const hx = (moveLen>1e-4) ? (mx/moveLen) : lastMoveDir.x;
-        const hz = (moveLen>1e-4) ? (mz/moveLen) : lastMoveDir.z;
-        glideDir = {x: hx, z: hz};
-        isGliding = true;
-      }
-      // Stamina should recover even if shift is held while gliding (handled below)
-    } else {
-      isGliding = false;
-    }
-
-    // Gravity: reduced while gliding
-    const gravMult = isGliding ? GLIDE_GRAVITY_MULT : 1.0;
-    velY -= GRAV * gravMult * dt;
-    // Clamp terminal velocity (downwards)
-    if(velY < -MAX_FALL_SPEED * (spaceDown ? 0.4 : 1.0)){
-      velY = -MAX_FALL_SPEED * (spaceDown ? 0.4 : 1.0);
-    }
-    camPos.y += velY * dt;
-
-    // Horizontal glide acceleration (does not affect vertical fall speed)
-    if(isGliding){
-      glideSpeed = Math.min(GLIDE_MAX_SPEED, glideSpeed + GLIDE_ACCEL * dt);
-      camPos.x += glideDir.x * glideSpeed * dt;
-      camPos.z += glideDir.z * glideSpeed * dt;
-    }
-
-    // Re-check ground contact after moving
-    groundY = sampleTerrainHeightAtWorld(camPos.x, camPos.z, SIZE);
-    if(WAVE_ON){ groundY += Math.sin(gTimeSec * WAVE_SPEED) * WAVE_AMP; }
-    const newFootY = groundY + EYE_HEIGHT;
-    if(camPos.y <= newFootY){
-      camPos.y = newFootY;
-      velY = 0;
-      isGrounded = true;
+    // Free flight: climb/sink via pitch; mild gravity sink
+    plane.pos.y += fwd.y * plane.speed * dt;
+    plane.pos.y -= GRAV * 0.05 * dt;
+    // Hard ground collision
+    const minY = groundY + PLANE_CLEARANCE;
+    if(plane.pos.y <= minY){
+      plane.pos.y = minY;
+      plane.onGround = true;
+      // frictional speed bleed on touchdown
+      plane.speed *= 0.85;
+      // flatten pitch on touchdown over time
+      plane.pitch *= 0.5;
     }
   }
 
-  // Track prev Space state for edge detection
-  prevSpaceDown = spaceDown;
+  // --- Camera follow (spring) ---
+  // Keep the camera behind the plane relative to plane forward, with a constant world-up height offset.
+  const camTarget = {
+    x: plane.pos.x - fwd.x * CAMERA_FOLLOW_DIST,
+    y: plane.pos.y + CAMERA_FOLLOW_HEIGHT,
+    z: plane.pos.z - fwd.z * CAMERA_FOLLOW_DIST,
+  };
+  // Hard lock X/Z behind the plane; only smooth vertical for comfort
+  const tY = 1 - Math.exp(-CAMERA_SPRING * dt);
+  camPos.x = camTarget.x;
+  camPos.z = camTarget.z;
+  camPos.y += (camTarget.y - camPos.y) * tY;
 
-  // While gliding, stamina should heal regardless of sprint key
-  if(isGliding){
-    const rec = (Math.abs(mx)+Math.abs(mz))>1e-4 ? STAMINA_RECOVER_MOVE : STAMINA_RECOVER_REST;
-    stamina = Math.min(1, stamina + rec * dt);
-  }
+  // Update player entity for renderer
+  playerEntity.pos.x = plane.pos.x;
+  playerEntity.pos.y = plane.pos.y;
+  playerEntity.pos.z = plane.pos.z;
+  playerEntity.yaw = plane.yaw + PLAYER_YAW_OFFSET;
+  playerEntity.initialized = true;
+
+  // Derive camera yaw/pitch toward a point ahead of the plane so the camera stays behind it
+  const lookAhead = 120.0;
+  const lookPoint = { x: plane.pos.x + fwd.x * lookAhead, y: plane.pos.y + fwd.y * lookAhead * 0.15, z: plane.pos.z + fwd.z * lookAhead };
+  const toLook = normalize3({ x: lookPoint.x - camPos.x, y: lookPoint.y - camPos.y, z: lookPoint.z - camPos.z });
+  const targetYaw = Math.atan2(toLook.x, -toLook.z);
+  const targetPitch = Math.asin(-toLook.y);
+  // Directly set orientation to minimize orbital lag
+  yaw = targetYaw;
+  pitch = targetPitch;
 }
 
 /*** ---------- Matrices ---------- ***/
@@ -1065,8 +1121,8 @@ function frame(t){
   // Lighting uniforms
   const lightDir = normalizeVec3([-0.6, -1.0, -0.4]); // coming from above-left
   gl.uniform3f(loc.u_lightDir, lightDir[0], lightDir[1], lightDir[2]);
-  gl.uniform3f(loc.u_lightColor, 1.0, 1.0, 1.0);
-  gl.uniform1f(loc.u_ambient, 0.85);
+  gl.uniform3f(loc.u_lightColor, 1.25, 1.25, 1.25);
+  gl.uniform1f(loc.u_ambient, 1.15);
   // Outline uniforms
   gl.uniform1i(loc.u_outlineOn, OUTLINE_ON ? 1 : 0);
   gl.uniform1f(loc.u_outlineScale, OUTLINE_SCALE);
@@ -1104,12 +1160,15 @@ function frame(t){
     gl.uniform2f(loc.u_outRes, outW, outH);
     gl.uniform1i(loc.u_activeBand, bandIndexToRender);
     const terrainIndexCount = (typeof getTerrainIndexCount==='function') ? getTerrainIndexCount() : indexCount;
-    // draw 3x3 tiles around camera by translating model matrix
-    const translations = [-1,0,1];
+    // draw 5x5 tiles anchored to the current camera tile so terrain follows the plane
+    const translations = [-2,-1,0,1,2];
+    const tileSpan = SIZE * 2.0;
+    const baseX = Math.floor(camPos.x / tileSpan) * tileSpan;
+    const baseZ = Math.floor(camPos.z / tileSpan) * tileSpan;
     for(let ox of translations){
       for(let oz of translations){
-        const tx = ox * SIZE * 2.0;
-        const tz = oz * SIZE * 2.0;
+        const tx = baseX + ox * tileSpan;
+        const tz = baseZ + oz * tileSpan;
         // Magic per-layer vertical wave offset
         let waveY = 0.0;
         if(WAVE_ON){
@@ -1128,19 +1187,7 @@ function frame(t){
     }
     // Draw player model in this band without stylization, using independent player transform
     if(playerModel && playerModel.ready && playerEntity.initialized){
-      const px = playerEntity.pos.x;
-      const py = playerEntity.pos.y;
-      const pz = playerEntity.pos.z;
-      // Orientation: world yaw only (about Y), then a constant fix-up Rx(-90deg) to align wings with ground
-      const cy = Math.cos(playerEntity.yaw), sy = Math.sin(playerEntity.yaw);
-      const sc = playerModel.scale * 0.6;
-      const mPlayer = new Float32Array([
-        // columns of R = Ry(yaw) * Rx(-90deg)
-        cy*sc,  0.0,  sy*sc, 0,
-        0.0,    sc,   0.0,   0,
-        -sy*sc, 0.0,  cy*sc, 0,
-        px,     py,   pz,    1
-      ]);
+      const mPlayer = getPlaneModelMatrix();
       gl.uniformMatrix4fv(loc.u_model, false, mPlayer);
       gl.uniform1i(loc.u_renderMode, 1);
       gl.uniform1i(loc.u_activeBand, bandIndexToRender);
@@ -1176,7 +1223,7 @@ function frame(t){
   gl.clearColor(0.02,0.02,0.02,1);
   gl.clear(gl.COLOR_BUFFER_BIT);
 
-  // Draw sky first
+  // Draw sky first (daytime texture)
   if(typeof drawSkyBackground === 'function'){
     drawSkyBackground(gl, canvas.width / canvas.height, FOVY, getDir, canvas, SKYBOX_URL);
   }
@@ -1198,11 +1245,14 @@ function frame(t){
     gl.uniform1i(loc.u_activeBand, -1);
     gl.uniform1i(loc.u_renderMode, 0);
     const terrainIndexCount = (typeof getTerrainIndexCount==='function') ? getTerrainIndexCount() : indexCount;
-    const translations = [-1,0,1];
+    const translations = [-2,-1,0,1,2];
+    const tileSpan = SIZE * 2.0;
+    const baseX = Math.floor(camPos.x / tileSpan) * tileSpan;
+    const baseZ = Math.floor(camPos.z / tileSpan) * tileSpan;
     for(let ox of translations){
       for(let oz of translations){
-        const tx = ox * SIZE * 2.0;
-        const tz = oz * SIZE * 2.0;
+        const tx = baseX + ox * tileSpan;
+        const tz = baseZ + oz * tileSpan;
         const modelT = new Float32Array([
           1,0,0,0,
           0,1,0,0,
@@ -1215,17 +1265,7 @@ function frame(t){
     }
     // Draw player
     if(playerModel && playerModel.ready && playerEntity.initialized){
-      const px = playerEntity.pos.x;
-      const py = playerEntity.pos.y;
-      const pz = playerEntity.pos.z;
-      const cy = Math.cos(playerEntity.yaw), sy = Math.sin(playerEntity.yaw);
-      const sc = playerModel.scale * 0.6;
-      const mPlayer = new Float32Array([
-        cy*sc,   0.0,   -sy*sc, 0,
-        0.0,     sc,     0.0,   0,
-        sy*sc,   0.0,    cy*sc, 0,
-        px,      py,     pz,    1
-      ]);
+      const mPlayer = getPlaneModelMatrix();
       gl.uniformMatrix4fv(loc.u_model, false, mPlayer);
       gl.uniform1i(loc.u_renderMode, 1);
       for(const d of playerModel.drawables){
@@ -1354,10 +1394,12 @@ function loadImage(url){
       await new Promise((resolve)=> setTimeout(resolve, 0));
       buildTerrainFromImage(gl, img, GRID, SIZE, HEIGHT_SCALE);
     }
+    // Ensure plane and camera are initialized on the ground ASAP
+    recenter();
     // Setup sky texture (via skybox.js if available)
     if(skyImg && typeof createSkyTexture === 'function') createSkyTexture(gl, skyImg);
-    // Default to procedural stars/moon unless user toggles otherwise
-    if(typeof setProceduralSky === 'function') setProceduralSky(true);
+    // Prefer textured sky by default when available
+    if(typeof setProceduralSky === 'function') setProceduralSky(false);
     // Provide alpha mask texture for card clipping
     if(typeof postSetMirrorMaskTexture === 'function') postSetMirrorMaskTexture(gl, maskImg);
     // Load player glTF model
@@ -1369,8 +1411,24 @@ function loadImage(url){
       playerModel.bounds = b;
       playerModel.scale = desired / maxDim;
       playerModel.ready = true;
-      // Initialize player placement once assets are ready if not already set
-      if(!playerEntity.initialized){ placePlayerInFront(); }
+      // Auto-align: derive from node transform 'nodeMatrix' of first drawable to account for model authoring axes
+      if(res.drawables && res.drawables.length > 0){
+        const m = res.drawables[0].nodeMatrix; // column-major
+        // Columns represent model local axes in world space
+        const ax = [ m[0], m[1], m[2] ];   // model +X in world
+        const ay = [ m[4], m[5], m[6] ];   // model +Y
+        const az = [ m[8], m[9], m[10] ];  // model +Z
+        // Build a 3x3 that maps body basis (right,up,forward) to world axes using the model's authoring axes
+        // We want forward -> -Z, up -> +Y, right -> +X, so set columns accordingly
+        // MODEL_ALIGN acts on our computed body basis to nudge it into the model's authored frame
+        MODEL_ALIGN = [ ax[0], ax[1], ax[2],
+                        ay[0], ay[1], ay[2],
+                       -az[0],-az[1],-az[2] ];
+        // Additional yaw trim to face forward: -90 degrees about up
+        PLAYER_MODEL_YAW_FIX = Math.PI * 0.5;
+      }
+      // Initialize airplane grounded placement once assets are ready if not already set
+      if(!playerEntity.initialized){ recenter(); }
     }catch(e){ console.error('Failed to load player glTF', e); }
     statusEl.textContent = `ready.`;
     requestAnimationFrame(frame);
