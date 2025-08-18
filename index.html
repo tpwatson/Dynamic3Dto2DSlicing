@@ -84,7 +84,7 @@
     <div id="bands"></div>
   </div>
 <canvas id="gl"></canvas>
-<img id="mirrorOverlay" src="blackmirror.png" alt="" />
+<img id="mirrorOverlay" src="blackmirror.png" alt="" style="display:none" />
 <div id="joyL" class="joy"><div class="knob"></div></div>
 <div id="joyR" class="joy"><div class="knob"></div></div>
 
@@ -94,6 +94,7 @@
 <script src="skybox.js"></script>
 <script src="terrain.js"></script>
 <script src="postcompose.js"></script>
+<script src="gltf.js"></script>
 
 <script>
 /*** ---------- Config ---------- ***/
@@ -104,6 +105,8 @@ const HEIGHTMAP_DATA_URL = "heightmap.png";
 */
 // Equirectangular sky texture
 const SKYBOX_URL = `skyboxnight.jpg`;
+const DEBUG_DIRECT_DRAW = false; // disable direct-draw to avoid duplicate plane renders
+const PLAYER_YAW_OFFSET = Math.PI; // face away from camera by default
 
 // Generate a procedural heightmap instead of loading external files
 function generateHeightmap(width, height) {
@@ -507,6 +510,7 @@ uniform float u_checkerSize; // world units per cell
 uniform float u_checkerAlpha; // opacity of checker overlay
   uniform bool  u_checkerScreen; // when true, checker grid is screen-space per band
 uniform int   u_activeBand; // -1 = render all; 0..13 = only that band (others discard)
+uniform int   u_renderMode; // 0 = terrain stylized, 1 = model (solid shading)
 // Outline controls
 uniform bool  u_outlineOn;      // enable black edge outlines
 uniform float u_outlineScale;   // scales edge sensitivity
@@ -554,6 +558,38 @@ float bandIndex(float d, float maxD, float N){
   // Band mask: when u_activeBand >= 0, only draw that band
   if(u_activeBand >= 0 && int(idx) != u_activeBand){
     discard;
+  }
+
+  // Simple PBR-ish shading path for models: baseColor, metallic, roughness
+  if(u_renderMode == 1){
+    vec3 n = normalize(v_norm);
+    vec3 V = normalize(u_camPos - v_world);
+    vec3 L = normalize(-u_lightDir);
+    vec3 H = normalize(V+L);
+    // Uniforms are packed via u_lightColor for base RGB and metallic in blue; roughness via u_ambient
+    float metallic = clamp(u_lightColor.z, 0.0, 1.0);
+    float roughness = clamp(u_ambient, 0.04, 1.0);
+    vec3 baseColor = vec3(u_lightColor.x, u_lightColor.y, 1.0);
+    float NdotL = max(dot(n,L), 0.0);
+    float NdotV = max(dot(n,V), 0.0);
+    float NdotH = max(dot(n,H), 0.0);
+    float VdotH = max(dot(V,H), 0.0);
+    float a = roughness*roughness;
+    float a2 = a*a;
+    float denom = (NdotH*NdotH*(a2-1.0)+1.0);
+    float D = a2 / max(3.14159 * denom*denom, 1e-4);
+    float k = (roughness+1.0); k = (k*k)/8.0;
+    float Gv = NdotV / max(NdotV*(1.0-k)+k, 1e-4);
+    float Gl = NdotL / max(NdotL*(1.0-k)+k, 1e-4);
+    float G = Gv * Gl;
+    vec3 F0 = mix(vec3(0.04), baseColor, metallic);
+    vec3 F = F0 + (1.0 - F0) * pow(1.0 - VdotH, 5.0);
+    vec3 spec = (D * G) * F / max(4.0 * NdotV * NdotL, 1e-4);
+    vec3 kd = (1.0 - F) * (1.0 - metallic);
+    vec3 diffuse = kd * baseColor / 3.14159;
+    vec3 color = (diffuse + spec) * NdotL;
+    o_color = vec4(color, 1.0);
+    return;
   }
 
   // Base color from palette by distance layer
@@ -616,8 +652,8 @@ float bandIndex(float d, float maxD, float N){
   float edge = max(abs(p.x), abs(p.y)) / halfSize;
   float mask = smoothstep(1.05, 0.85, edge);
 
-  // composite: each layer paints only inside its blotch cells, but keep some coverage
-  // to avoid holes. We mix with a lighter “paper” to suggest texture.
+  // composite: each layer paints only inside its blotch cells. We intentionally
+  // keep coverage below 1.0 (especially for near bands) so deeper bands remain visible.
   vec3 paper = vec3(0.0,0.0,0.0);
   vec3 painted = mix(color, color*0.85, 0.3 + 0.2*r); // slight variation per stamp
 
@@ -629,8 +665,12 @@ float bandIndex(float d, float maxD, float N){
   // No fog: final color is just painted
   vec3 col = painted;
 
-  // apply mask as coverage and alpha so transparent gaps remain between layers
+  // apply mask as coverage and alpha; modulate by band index so nearer bands
+  // remain more porous and do not fully cover distant bands
   float coverage = clamp(mask, 0.0, 1.0);
+  float tBand = (u_layers > 1) ? (idx / float(u_layers - 1)) : 0.0; // 0 near, 1 far
+  float bandCoverageScale = mix(0.42, 0.88, tBand); // near ~0.42, far ~0.88
+  coverage *= bandCoverageScale;
   // Screen-space edge outlines based on normal/depth variations
   if(u_outlineOn && int(idx) == u_outlineBand){
     // Use derivatives to detect discontinuities that suggest geometric edges
@@ -665,7 +705,7 @@ const prog = link(vs, fs);
 gl.useProgram(prog);
 
 const loc = {
-  a_pos: 0, a_col: 1,
+  a_pos: 0, a_col: 1, a_norm: 2,
   u_proj: gl.getUniformLocation(prog,'u_proj'),
   u_view: gl.getUniformLocation(prog,'u_view'),
   u_model: gl.getUniformLocation(prog,'u_model'),
@@ -684,6 +724,7 @@ const loc = {
   u_checkerAlpha: gl.getUniformLocation(prog,'u_checkerAlpha'),
   u_checkerScreen: gl.getUniformLocation(prog,'u_checkerScreen'),
   u_activeBand: gl.getUniformLocation(prog,'u_activeBand'),
+  u_renderMode: gl.getUniformLocation(prog,'u_renderMode'),
   // outline uniforms
   u_outlineOn: gl.getUniformLocation(prog,'u_outlineOn'),
   u_outlineScale: gl.getUniformLocation(prog,'u_outlineScale'),
@@ -726,10 +767,27 @@ let cardTiltXTarget = 0, cardTiltYTarget = 0;
 let stamina = 1.0;             // 0..1
 let sprintHoldTime = 0.0;      // seconds continuously holding sprint
 let isSprinting = false;
+// Player model (glTF)
+let playerModel = { ready:false, drawables:[], bounds:null, scale:1 };
+// Player entity state: world transform independent of camera
+let playerEntity = { initialized:false, pos:{x:0,y:0,z:0}, yaw:0 };
 
 const keys = {};
 addEventListener('keydown', e=>{ keys[e.key.toLowerCase()] = true; if(e.key==='r'||e.key==='R') recenter(); if(e.key==='h'||e.key==='H') setUiHidden(!uiHidden); });
 addEventListener('keyup', e=>{ keys[e.key.toLowerCase()] = false; });
+
+// Debug helper: place plane in front of camera (P)
+function placePlayerInFront(){
+  const f = getDir();
+  playerEntity.pos.x = camPos.x + f.x * 30.0;
+  playerEntity.pos.z = camPos.z + f.z * 30.0;
+  playerEntity.pos.y = sampleTerrainHeightAtWorld(playerEntity.pos.x, playerEntity.pos.z, SIZE) + 10.0;
+  playerEntity.yaw = yaw + PLAYER_YAW_OFFSET;
+  playerEntity.initialized = true;
+}
+addEventListener('keydown', e=>{
+  if(e.key==='p' || e.key==='P'){ placePlayerInFront(); }
+});
 
 function recenter(){
   camPos = {x:0, y:60, z:-SIZE*0.9};
@@ -737,6 +795,13 @@ function recenter(){
   // snap to terrain if available
   const gy = sampleTerrainHeightAtWorld(camPos.x, camPos.z, SIZE);
   camPos.y = gy + EYE_HEIGHT;
+  // Initialize player straight ahead of camera at a fixed offset, facing current camera yaw
+  const f = getDir();
+  playerEntity.pos.x = camPos.x + f.x * 30.0;
+  playerEntity.pos.z = camPos.z + f.z * 30.0;
+  playerEntity.pos.y = sampleTerrainHeightAtWorld(playerEntity.pos.x, playerEntity.pos.z, SIZE) + 10.0;
+  playerEntity.yaw = yaw;
+  playerEntity.initialized = true;
 }
 recenterBtn.onclick = recenter;
 
@@ -830,6 +895,14 @@ function tick(dt){
   const len = Math.hypot(mx,my,mz) || 1;
   camPos.x += (mx/len)*curSpeed*dt;
   camPos.z += (mz/len)*curSpeed*dt;
+
+  // Update player yaw to align with camera yaw, but keep its world position fixed
+  if(playerEntity.initialized){
+    playerEntity.yaw = yaw + PLAYER_YAW_OFFSET;
+    // Keep the plane hovering above terrain at its position
+    const gy = sampleTerrainHeightAtWorld(playerEntity.pos.x, playerEntity.pos.z, SIZE);
+    playerEntity.pos.y = gy + 10.0;
+  }
 
   // --- Vertical physics: jump / gravity / glide ---
   // Base ground height (include wave of nearest band so player rides it when grounded)
@@ -1002,7 +1075,8 @@ function frame(t){
   // Checker uniforms
   gl.uniform1f(loc.u_checkerSize, CHECKER_SIZE);
   gl.uniform1f(loc.u_checkerAlpha, CHECKER_ALPHA);
-  gl.uniform1i(loc.u_checkerScreen, CHECKER_SCREEN ? 0 : 1);
+  gl.uniform1i(loc.u_checkerScreen, CHECKER_SCREEN ? 1 : 0);
+  gl.uniform1i(loc.u_renderMode, 0);
 
   // 1) Render each band to its texture (draw multiple wrapped tiles in a 3x3 grid)
   gl.bindVertexArray(vao);
@@ -1010,7 +1084,7 @@ function frame(t){
   if(typeof bindTerrainBuffers==='function') bindTerrainBuffers(gl);
   // Use actual canvas dimensions for square screen-space checkers
   const outW = canvas.width, outH = canvas.height;
-  const passesToRender = (activeBand>=0) ? 1 : LAYERS;
+  const passesToRender = (activeBand>=0) ? 1 : LAYER_PASSES;
   for(let p=0;p<passesToRender;p++){
     const bandIndexToRender = (activeBand>=0) ? activeBand : p;
     if(typeof postBindLayerFbo==='function') postBindLayerFbo(gl, bandIndexToRender);
@@ -1052,8 +1126,33 @@ function frame(t){
         gl.drawElements(gl.TRIANGLES, terrainIndexCount, gl.UNSIGNED_INT, 0);
       }
     }
-    // restore identity model for subsequent logic
-    gl.uniformMatrix4fv(loc.u_model,false,model);
+    // Draw player model in this band without stylization, using independent player transform
+    if(playerModel && playerModel.ready && playerEntity.initialized){
+      const px = playerEntity.pos.x;
+      const py = playerEntity.pos.y;
+      const pz = playerEntity.pos.z;
+      // Orientation: world yaw only (about Y), then a constant fix-up Rx(-90deg) to align wings with ground
+      const cy = Math.cos(playerEntity.yaw), sy = Math.sin(playerEntity.yaw);
+      const sc = playerModel.scale * 0.6;
+      const mPlayer = new Float32Array([
+        // columns of R = Ry(yaw) * Rx(-90deg)
+        cy*sc,  0.0,  sy*sc, 0,
+        0.0,    sc,   0.0,   0,
+        -sy*sc, 0.0,  cy*sc, 0,
+        px,     py,   pz,    1
+      ]);
+      gl.uniformMatrix4fv(loc.u_model, false, mPlayer);
+      gl.uniform1i(loc.u_renderMode, 1);
+      gl.uniform1i(loc.u_activeBand, bandIndexToRender);
+      for(const d of playerModel.drawables){
+        gl.bindVertexArray(d.vao);
+        gl.drawElements(d.mode, d.indexCount, d.indexType, d.indexOffsetBytes);
+      }
+      gl.uniformMatrix4fv(loc.u_model,false,model);
+      gl.uniform1i(loc.u_renderMode, 0);
+    } else {
+      gl.uniformMatrix4fv(loc.u_model,false,model);
+    }
     if(typeof postMarkBandRendered==='function') postMarkBandRendered(bandIndexToRender);
   }
 
@@ -1077,37 +1176,73 @@ function frame(t){
   gl.clearColor(0.02,0.02,0.02,1);
   gl.clear(gl.COLOR_BUFFER_BIT);
 
-  // Draw sky only inside the diorama/mirror rect so it matches the vertical composition
-  (function(){
-    const mirror = document.getElementById('mirrorOverlay');
-    if(typeof drawSkyBackground === 'function' && mirror){
-      const dpr = Math.min(2, window.devicePixelRatio||1);
-      const r = mirror.getBoundingClientRect();
-      const x = Math.max(0, Math.floor(r.left * dpr));
-      const y = Math.max(0, Math.floor(r.top * dpr));
-      const w = Math.max(1, Math.floor(r.width * dpr));
-      const h = Math.max(1, Math.floor(r.height * dpr));
-      const yGL = canvas.height - y - h;
-      gl.enable(gl.SCISSOR_TEST);
-      gl.scissor(x, yGL, w, h);
-      drawSkyBackground(gl, aspect, FOVY, getDir, canvas, SKYBOX_URL);
-      gl.disable(gl.SCISSOR_TEST);
-    }
-  })();
-
-  // 2) Draw diorama exactly under the mirror overlay bounds (clipped), keeping 9:16 via the image sizing
-  if(typeof postDrawDioramaCard === 'function'){
-    const dpr = Math.min(2, window.devicePixelRatio||1);
-    const mirror = document.getElementById('mirrorOverlay');
-    if(mirror){
-      const r = mirror.getBoundingClientRect();
-      const x = Math.max(0, Math.floor(r.left * dpr));
-      const y = Math.max(0, Math.floor(r.top * dpr));
-      const w = Math.max(1, Math.floor(r.width * dpr));
-      const h = Math.max(1, Math.floor(r.height * dpr));
-      postDrawDioramaCard(gl, canvas.width, canvas.height, LAYERS, { x, y, w, h, tiltX: 0.0, tiltY: 0.0, depth: 0.0, zSpacing: 0.0, clip:true, maskThreshold: 0.4, activeBand });
-    }
+  // Draw sky first
+  if(typeof drawSkyBackground === 'function'){
+    drawSkyBackground(gl, canvas.width / canvas.height, FOVY, getDir, canvas, SKYBOX_URL);
   }
+
+  // Then compose terrain layers over the sky
+  if(typeof postDrawLayersFullscreen === 'function'){
+    postDrawLayersFullscreen(gl, canvas.width, canvas.height, LAYER_PASSES, activeBand);
+  }
+
+  // TEMP direct draw (bypasses offscreen band FBOs)
+  if(DEBUG_DIRECT_DRAW){
+    gl.useProgram(prog);
+    gl.bindVertexArray(vao);
+    if(typeof bindTerrainBuffers==='function') bindTerrainBuffers(gl);
+    gl.enable(gl.DEPTH_TEST);
+    gl.viewport(0,0,canvas.width,canvas.height);
+    gl.uniform2f(loc.u_res, canvas.width, canvas.height);
+    gl.uniform2f(loc.u_outRes, canvas.width, canvas.height);
+    gl.uniform1i(loc.u_activeBand, -1);
+    gl.uniform1i(loc.u_renderMode, 0);
+    const terrainIndexCount = (typeof getTerrainIndexCount==='function') ? getTerrainIndexCount() : indexCount;
+    const translations = [-1,0,1];
+    for(let ox of translations){
+      for(let oz of translations){
+        const tx = ox * SIZE * 2.0;
+        const tz = oz * SIZE * 2.0;
+        const modelT = new Float32Array([
+          1,0,0,0,
+          0,1,0,0,
+          0,0,1,0,
+          tx,0,tz,1
+        ]);
+        gl.uniformMatrix4fv(loc.u_model,false,modelT);
+        gl.drawElements(gl.TRIANGLES, terrainIndexCount, gl.UNSIGNED_INT, 0);
+      }
+    }
+    // Draw player
+    if(playerModel && playerModel.ready && playerEntity.initialized){
+      const px = playerEntity.pos.x;
+      const py = playerEntity.pos.y;
+      const pz = playerEntity.pos.z;
+      const cy = Math.cos(playerEntity.yaw), sy = Math.sin(playerEntity.yaw);
+      const sc = playerModel.scale * 0.6;
+      const mPlayer = new Float32Array([
+        cy*sc,   0.0,   -sy*sc, 0,
+        0.0,     sc,     0.0,   0,
+        sy*sc,   0.0,    cy*sc, 0,
+        px,      py,     pz,    1
+      ]);
+      gl.uniformMatrix4fv(loc.u_model, false, mPlayer);
+      gl.uniform1i(loc.u_renderMode, 1);
+      for(const d of playerModel.drawables){
+        gl.bindVertexArray(d.vao);
+        if(d.material){
+          const base = d.material.base; const metallic = d.material.metallic; const roughness = d.material.roughness;
+          gl.uniform3f(loc.u_lightColor, base[0], base[1], metallic);
+          gl.uniform1f(loc.u_ambient, Math.max(0.04, Math.min(1.0, roughness)));
+        }
+        gl.drawElements(d.mode, d.indexCount, d.indexType, d.indexOffsetBytes);
+      }
+      gl.uniform1i(loc.u_renderMode, 0);
+    }
+    gl.disable(gl.DEPTH_TEST);
+  }
+
+  // Card rendering disabled in single-canvas mode
 
   // Sync mirror overlay tilt with card tilt
   const mirror = document.getElementById('mirrorOverlay');
@@ -1225,6 +1360,18 @@ function loadImage(url){
     if(typeof setProceduralSky === 'function') setProceduralSky(true);
     // Provide alpha mask texture for card clipping
     if(typeof postSetMirrorMaskTexture === 'function') postSetMirrorMaskTexture(gl, maskImg);
+    // Load player glTF model
+    try{
+      const res = await loadGltf(gl, 'assets/3d/player/scene.gltf', { a_pos: 0, a_col: 1, a_norm: 2 });
+      const b = res.bounds; const maxDim = Math.max(b.size[0], b.size[1], b.size[2]) || 1.0;
+      const desired = 40.0; // target size in world units
+      playerModel.drawables = res.drawables;
+      playerModel.bounds = b;
+      playerModel.scale = desired / maxDim;
+      playerModel.ready = true;
+      // Initialize player placement once assets are ready if not already set
+      if(!playerEntity.initialized){ placePlayerInFront(); }
+    }catch(e){ console.error('Failed to load player glTF', e); }
     statusEl.textContent = `ready.`;
     requestAnimationFrame(frame);
   }catch(e){
