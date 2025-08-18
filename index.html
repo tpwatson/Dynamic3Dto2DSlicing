@@ -66,6 +66,10 @@
     <label>Layer Res Scale (perf) <span class="val" id="v_resScale"></span></label>
     <input id="ctl_resScale" type="range" min="0.25" max="1" step="0.05">
     <label><input id="ctl_lockLayer" type="checkbox" checked> Lock Layer Max to View Far</label>
+    <label><input id="ctl_starsSky" type="checkbox" checked> Stars/Moon Sky</label>
+    <label><input id="ctl_moonOnSky" type="checkbox" checked> Moon</label>
+    <label>Star Density <span class="val" id="v_starDensity"></span></label>
+    <input id="ctl_starDensity" type="range" min="200" max="2000" step="10">
     <label><input id="ctl_asciiOn" type="checkbox"> ASCII Mode</label>
     <label>ASCII Cell Px <span class="val" id="v_asciiCell"></span></label>
     <input id="ctl_asciiCell" type="range" min="4" max="48" step="1">
@@ -99,7 +103,7 @@ If you want to use your file instead, e.g. "heightmap.png", put it in same folde
 const HEIGHTMAP_DATA_URL = "heightmap.png";
 */
 // Equirectangular sky texture
-const SKYBOX_URL = `skybox1.jpg`;
+const SKYBOX_URL = `skyboxnight.jpg`;
 
 // Generate a procedural heightmap instead of loading external files
 function generateHeightmap(width, height) {
@@ -268,6 +272,9 @@ const ctlWavePhase = document.getElementById('ctl_wavePhase');
 const ctlLayerPasses = document.getElementById('ctl_layerPasses');
 const ctlResScale = document.getElementById('ctl_resScale');
 const ctlLockLayer = document.getElementById('ctl_lockLayer');
+const ctlStarsSky = document.getElementById('ctl_starsSky');
+const ctlMoonOnSky = document.getElementById('ctl_moonOnSky');
+const ctlStarDensity = document.getElementById('ctl_starDensity');
 const ctlAsciiOn = document.getElementById('ctl_asciiOn');
 const ctlAsciiCell = document.getElementById('ctl_asciiCell');
 const ctlAsciiBright = document.getElementById('ctl_asciiBright');
@@ -286,6 +293,7 @@ const vWaveSpeed = document.getElementById('v_waveSpeed');
 const vWavePhase = document.getElementById('v_wavePhase');
 const vLayerPasses = document.getElementById('v_layerPasses');
 const vResScale = document.getElementById('v_resScale');
+const vStarDensity = document.getElementById('v_starDensity');
 const vAsciiCell = document.getElementById('v_asciiCell');
 const vAsciiBright = document.getElementById('v_asciiBright');
 const vAsciiDark = document.getElementById('v_asciiDark');
@@ -318,6 +326,9 @@ function syncUI(){
   ctlLayerPasses.value = LAYER_PASSES;
   ctlResScale.value = RES_SCALE;
   ctlLockLayer.checked = LOCK_LAYER_TO_VIEW;
+  if(ctlStarsSky){ ctlStarsSky.checked = true; }
+  if(ctlMoonOnSky){ ctlMoonOnSky.checked = true; }
+  if(ctlStarDensity){ ctlStarDensity.value = 900; }
   if(ctlAsciiOn){ ctlAsciiOn.checked = ASCII_ON; }
   if(ctlAsciiCell){ ctlAsciiCell.value = ASCII_CELL_PX; }
   if(ctlAsciiBright){ ctlAsciiBright.value = ASCII_BRIGHTNESS; }
@@ -337,6 +348,7 @@ function syncUI(){
   vOutInt.textContent = OUTLINE_INTENSITY.toFixed(2);
   vLayerPasses.textContent = LAYER_PASSES.toString();
   vResScale.textContent = RES_SCALE.toFixed(2);
+  if(vStarDensity) vStarDensity.textContent = '900';
   if(vAsciiCell) vAsciiCell.textContent = ASCII_CELL_PX.toFixed(0);
   if(vAsciiBright) vAsciiBright.textContent = ASCII_BRIGHTNESS.toFixed(2);
   if(vAsciiDark) vAsciiDark.textContent = ASCII_BG_DARKEN.toFixed(2);
@@ -399,6 +411,11 @@ if(ctlWavePhase){ ctlWavePhase.addEventListener('input', ()=>{ WAVE_PHASE = Numb
 ctlLockLayer.addEventListener('change', ()=>{ LOCK_LAYER_TO_VIEW = ctlLockLayer.checked; if(LOCK_LAYER_TO_VIEW){ LAYER_MAX_DIST = VIEW_FAR; ctlLayerMax.value = LAYER_MAX_DIST; vLayerMax.textContent = LAYER_MAX_DIST.toFixed(0);} });
 ctlViewFar.addEventListener('input', ()=>{ if(LOCK_LAYER_TO_VIEW){ LAYER_MAX_DIST = VIEW_FAR; ctlLayerMax.value = LAYER_MAX_DIST; vLayerMax.textContent = LAYER_MAX_DIST.toFixed(0);} });
 // Fog controls removed
+
+// Procedural sky controls
+if(ctlStarsSky){ ctlStarsSky.addEventListener('change', ()=>{ if(typeof setProceduralSky==='function') setProceduralSky(ctlStarsSky.checked); }); }
+if(ctlMoonOnSky){ ctlMoonOnSky.addEventListener('change', ()=>{ if(typeof configureProceduralSky==='function') configureProceduralSky({ moonOn: ctlMoonOnSky.checked }); }); }
+if(ctlStarDensity){ ctlStarDensity.addEventListener('input', ()=>{ vStarDensity.textContent = ctlStarDensity.value; if(typeof configureProceduralSky==='function') configureProceduralSky({ starDensity: Number(ctlStarDensity.value) }); }); }
 
 // ASCII controls
 if(ctlAsciiOn){ ctlAsciiOn.addEventListener('change', ()=>{ ASCII_ON = ctlAsciiOn.checked; if(ASCII_ON){ if(typeof postEnsureSceneTarget==='function') postEnsureSceneTarget(gl, canvas.width, canvas.height); } }); }
@@ -1051,8 +1068,7 @@ function frame(t){
   gl.disable(gl.DEPTH_TEST);
   gl.clearColor(0.0,0.0,0.0,1);
   gl.clear(gl.COLOR_BUFFER_BIT);
-  // Sky as background (drawn first)
-  if(typeof drawSkyBackground === 'function') drawSkyBackground(gl, aspect, FOVY, getDir, canvas, SKYBOX_URL);
+  // Sky was previously drawn here, but we clear again below. We'll draw it after the clear.
 
   // Fill background with solid color; skip fullscreen composition
   // Keep target as set above (scene FBO or default)
@@ -1060,6 +1076,24 @@ function frame(t){
   gl.disable(gl.DEPTH_TEST);
   gl.clearColor(0.02,0.02,0.02,1);
   gl.clear(gl.COLOR_BUFFER_BIT);
+
+  // Draw sky only inside the diorama/mirror rect so it matches the vertical composition
+  (function(){
+    const mirror = document.getElementById('mirrorOverlay');
+    if(typeof drawSkyBackground === 'function' && mirror){
+      const dpr = Math.min(2, window.devicePixelRatio||1);
+      const r = mirror.getBoundingClientRect();
+      const x = Math.max(0, Math.floor(r.left * dpr));
+      const y = Math.max(0, Math.floor(r.top * dpr));
+      const w = Math.max(1, Math.floor(r.width * dpr));
+      const h = Math.max(1, Math.floor(r.height * dpr));
+      const yGL = canvas.height - y - h;
+      gl.enable(gl.SCISSOR_TEST);
+      gl.scissor(x, yGL, w, h);
+      drawSkyBackground(gl, aspect, FOVY, getDir, canvas, SKYBOX_URL);
+      gl.disable(gl.SCISSOR_TEST);
+    }
+  })();
 
   // 2) Draw diorama exactly under the mirror overlay bounds (clipped), keeping 9:16 via the image sizing
   if(typeof postDrawDioramaCard === 'function'){
@@ -1171,10 +1205,13 @@ function loadImage(url){
 
 (async function(){
   try{
-    // Load heightmap and skybox in parallel
+    // Load heightmap and optional skybox in parallel
+    const skyPromise = (typeof SKYBOX_URL === 'string' && SKYBOX_URL.trim().length > 0)
+      ? loadImage(SKYBOX_URL)
+      : Promise.resolve(null);
     const [img, skyImg, maskImg] = await Promise.all([
       loadImage(FINAL_DATA_URL),
-      loadImage(SKYBOX_URL),
+      skyPromise,
       loadImage('blackmirror.png')
     ]);
     statusEl.textContent = `heightmap loaded: ${img.width}×${img.height} — building terrain…`;
@@ -1183,7 +1220,9 @@ function loadImage(url){
       buildTerrainFromImage(gl, img, GRID, SIZE, HEIGHT_SCALE);
     }
     // Setup sky texture (via skybox.js if available)
-    if(typeof createSkyTexture === 'function') createSkyTexture(gl, skyImg);
+    if(skyImg && typeof createSkyTexture === 'function') createSkyTexture(gl, skyImg);
+    // Default to procedural stars/moon unless user toggles otherwise
+    if(typeof setProceduralSky === 'function') setProceduralSky(true);
     // Provide alpha mask texture for card clipping
     if(typeof postSetMirrorMaskTexture === 'function') postSetMirrorMaskTexture(gl, maskImg);
     statusEl.textContent = `ready.`;
