@@ -10,6 +10,14 @@ let maskTexPost = null;
 let FROZEN_START_BAND = -1; // -1 = disabled; >=0 means bands [start..] are frozen (render once)
 let frozenValid = null;     // boolean per band when frozen
 
+// Scene capture for post FX (ASCII)
+let sceneFboPost = null, sceneTexPost = null, sceneDepthPost = null;
+let sceneWPost = 0, sceneHPost = 0;
+
+// ASCII shader and font atlas
+let asciiProgPost = null, asciiLocPost = null;
+let asciiFontTexPost = null; let asciiColsPost = 0, asciiRowsPost = 0, asciiGlyphCountPost = 0;
+
 function ensureFullscreenGeomPost(gl){
   if(fsVaoPost) return;
   fsVaoPost = gl.createVertexArray();
@@ -38,6 +46,122 @@ function initQuadProgramPost(gl){
   const FSQ = `#version 300 es\nprecision highp float;\n\nin vec2 v_uv;\n\nuniform sampler2D u_tex;\nuniform vec2 u_texel;      // 1/textureSize in pixels\nuniform float u_edgePx;    // outline width in px (texture space)\n\nout vec4 o_color;\n\nvoid main(){\n  vec4 base = texture(u_tex, v_uv);\n  float a = base.a;\n  vec2 o = u_texel * u_edgePx;\n  float a1 = texture(u_tex, v_uv + vec2( o.x, 0.0)).a;\n  float a2 = texture(u_tex, v_uv + vec2(-o.x, 0.0)).a;\n  float a3 = texture(u_tex, v_uv + vec2(0.0,  o.y)).a;\n  float a4 = texture(u_tex, v_uv + vec2(0.0, -o.y)).a;\n  float a5 = texture(u_tex, v_uv + vec2( o.x,  o.y)).a;\n  float a6 = texture(u_tex, v_uv + vec2(-o.x,  o.y)).a;\n  float a7 = texture(u_tex, v_uv + vec2( o.x, -o.y)).a;\n  float a8 = texture(u_tex, v_uv + vec2(-o.x, -o.y)).a;\n  float nmax = max(max(max(a1,a2),max(a3,a4)), max(max(a5,a6), max(a7,a8)));\n  float isEdgeOutside = step(a, 0.05) * step(0.05, nmax); // outside but near filled texel\n  vec4 outline = vec4(0.0, 0.0, 0.0, 1.0);\n  o_color = mix(base, outline, isEdgeOutside);\n}`;
   quadProgPost = linkPost(gl, compilePost(gl, gl.VERTEX_SHADER, VSQ), compilePost(gl, gl.FRAGMENT_SHADER, FSQ));
   quadLocPost = { u_tex: gl.getUniformLocation(quadProgPost, 'u_tex'), u_texel: gl.getUniformLocation(quadProgPost, 'u_texel'), u_edgePx: gl.getUniformLocation(quadProgPost, 'u_edgePx') };
+}
+
+function ensureSceneTargetPost(gl, canvasWidth, canvasHeight){
+  if(sceneWPost === canvasWidth && sceneHPost === canvasHeight && sceneFboPost && sceneTexPost && sceneDepthPost){ return; }
+  // delete old
+  if(sceneTexPost){ gl.deleteTexture(sceneTexPost); sceneTexPost = null; }
+  if(sceneDepthPost){ gl.deleteRenderbuffer(sceneDepthPost); sceneDepthPost = null; }
+  if(sceneFboPost){ gl.deleteFramebuffer(sceneFboPost); sceneFboPost = null; }
+  // create new
+  sceneWPost = Math.max(1, canvasWidth|0);
+  sceneHPost = Math.max(1, canvasHeight|0);
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, sceneWPost, sceneHPost, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  const rb = gl.createRenderbuffer();
+  gl.bindRenderbuffer(gl.RENDERBUFFER, rb);
+  gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, sceneWPost, sceneHPost);
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, rb);
+  sceneTexPost = tex; sceneDepthPost = rb; sceneFboPost = fbo;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+
+function bindSceneFboPost(gl){ if(sceneFboPost){ gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFboPost); } }
+
+function initAsciiProgramPost(gl){
+  if(asciiProgPost) return;
+  const VS = `#version 300 es\nlayout(location=0) in vec2 a_pos;\nlayout(location=1) in vec2 a_uv;\nout vec2 v_uv;\nvoid main(){ v_uv = a_uv; gl_Position = vec4(a_pos,0.0,1.0); }`;
+  const FS = `#version 300 es\nprecision highp float;\n\n in vec2 v_uv;\n\n uniform sampler2D u_scene;\n uniform sampler2D u_font;\n uniform vec2 u_viewport;   // pixels (scene size)\n uniform vec2 u_cellPx;     // pixels per character cell (x,y)\n uniform int u_cols;        // font atlas columns\n uniform int u_rows;        // font atlas rows\n uniform int u_glyphCount;  // number of glyphs available\n uniform float u_gamma;     // gamma correction\n uniform float u_brightness; // glyph brightness multiplier\n uniform float u_bgDarken;   // 0..1, how much to darken background scene\n\n out vec4 o_color;\n\n float luminance(vec3 c){ return dot(c, vec3(0.299, 0.587, 0.114)); }\n\n void main(){\n   vec2 fragPx = v_uv * u_viewport;\n   vec2 cell = max(vec2(1.0), u_cellPx);\n   vec2 cellId = floor(fragPx / cell);\n   vec2 cellOriginPx = cellId * cell;\n   vec2 cellCenterPx = cellOriginPx + cell * 0.5;\n   vec2 uvCenter = cellCenterPx / u_viewport;\n   float lod = max(0.0, log2(max(cell.x, cell.y)));\n   vec3 sceneCol = textureLod(u_scene, uvCenter, lod).rgb;\n   sceneCol = pow(sceneCol, vec3(u_gamma));\n   float lum = luminance(sceneCol);\n   int maxIdx = max(1, u_glyphCount - 1);\n   int idx = int(float(maxIdx) * (1.0 - lum) + 0.5);\n   idx = clamp(idx, 0, maxIdx);\n   int cx = idx % u_cols;\n   int cy = idx / u_cols;\n   vec2 cellUv = fract(fragPx / cell);\n   vec2 fontUv = (vec2(float(cx), float(cy)) + cellUv) / vec2(float(u_cols), float(u_rows));\n   float a = texture(u_font, fontUv).r;\n   vec3 glyphCol = clamp(sceneCol * u_brightness, 0.0, 1.0);\n   vec3 bgCol = mix(sceneCol, vec3(0.0), clamp(u_bgDarken, 0.0, 1.0));\n   vec3 outCol = mix(bgCol, glyphCol, a);\n   o_color = vec4(outCol, 1.0);\n }`;
+  asciiProgPost = linkPost(gl, compilePost(gl, gl.VERTEX_SHADER, VS), compilePost(gl, gl.FRAGMENT_SHADER, FS));
+  asciiLocPost = {
+    u_scene: gl.getUniformLocation(asciiProgPost, 'u_scene'),
+    u_font: gl.getUniformLocation(asciiProgPost, 'u_font'),
+    u_viewport: gl.getUniformLocation(asciiProgPost, 'u_viewport'),
+    u_cellPx: gl.getUniformLocation(asciiProgPost, 'u_cellPx'),
+    u_cols: gl.getUniformLocation(asciiProgPost, 'u_cols'),
+    u_rows: gl.getUniformLocation(asciiProgPost, 'u_rows'),
+    u_glyphCount: gl.getUniformLocation(asciiProgPost, 'u_glyphCount'),
+    u_gamma: gl.getUniformLocation(asciiProgPost, 'u_gamma'),
+    u_brightness: gl.getUniformLocation(asciiProgPost, 'u_brightness'),
+    u_bgDarken: gl.getUniformLocation(asciiProgPost, 'u_bgDarken'),
+  };
+}
+
+function ensureAsciiFontPost(gl){
+  if(asciiFontTexPost) return;
+  // Build a small atlas at runtime using Canvas2D
+  const charset = " .'`^\",:;Il!i><~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$"; // 70 glyphs
+  // Use first 64 glyphs to make a power-of-two grid 16x4
+  const useCount = Math.min(64, charset.length);
+  asciiGlyphCountPost = useCount;
+  asciiColsPost = 16; asciiRowsPost = intDivCeil(useCount, asciiColsPost);
+  const cell = 24; // px per cell
+  const pad = 2;
+  const w = asciiColsPost * cell;
+  const h = asciiRowsPost * cell;
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0,0,w,h);
+  ctx.fillStyle = '#fff';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center';
+  ctx.font = `${cell - pad*2}px monospace`;
+  for(let i=0;i<useCount;i++){
+    const ch = charset[i];
+    const col = i % asciiColsPost; const row = (i / asciiColsPost)|0;
+    const x = col * cell + cell * 0.5;
+    const y = row * cell + cell * 0.5 + 1; // slight vertical tweak
+    ctx.fillText(ch, x, y);
+  }
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
+  asciiFontTexPost = tex;
+}
+
+function intDivCeil(a,b){ return Math.floor((a + b - 1)/b); }
+
+function presentAsciiPost(gl, viewportW, viewportH, cellPx, brightness, bgDarken, gamma){
+  if(!sceneTexPost) return;
+  ensureFullscreenGeomPost(gl); initAsciiProgramPost(gl); ensureAsciiFontPost(gl);
+  // Prepare scene mipmaps for average sampling per cell
+  gl.bindTexture(gl.TEXTURE_2D, sceneTexPost);
+  gl.generateMipmap(gl.TEXTURE_2D);
+  // Draw to default framebuffer
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0,0,viewportW,viewportH);
+  gl.disable(gl.DEPTH_TEST);
+  gl.disable(gl.BLEND);
+  gl.useProgram(asciiProgPost);
+  gl.bindVertexArray(fsVaoPost || (ensureFullscreenGeomPost(gl), fsVaoPost));
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, sceneTexPost); gl.uniform1i(asciiLocPost.u_scene, 0);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, asciiFontTexPost); gl.uniform1i(asciiLocPost.u_font, 1);
+  gl.uniform2f(asciiLocPost.u_viewport, viewportW, viewportH);
+  const cell = Math.max(2, cellPx|0);
+  gl.uniform2f(asciiLocPost.u_cellPx, cell, cell);
+  gl.uniform1i(asciiLocPost.u_cols, asciiColsPost);
+  gl.uniform1i(asciiLocPost.u_rows, asciiRowsPost);
+  gl.uniform1i(asciiLocPost.u_glyphCount, asciiGlyphCountPost);
+  gl.uniform1f(asciiLocPost.u_gamma, (typeof gamma==='number') ? gamma : 1.0);
+  gl.uniform1f(asciiLocPost.u_brightness, (typeof brightness==='number') ? brightness : 1.0);
+  gl.uniform1f(asciiLocPost.u_bgDarken, (typeof bgDarken==='number') ? bgDarken : 0.9);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 }
 
 function createLayerTargets(gl, canvasWidth, canvasHeight, layers, resScale){
@@ -247,5 +371,10 @@ window.postShouldRenderBand = function(i){
   return true;
 };
 window.postMarkBandRendered = function(i){ if(FROZEN_START_BAND >= 0 && i >= FROZEN_START_BAND && frozenValid){ frozenValid[i] = true; } };
+
+// ASCII API
+window.postEnsureSceneTarget = ensureSceneTargetPost;
+window.postBindSceneFbo = bindSceneFboPost;
+window.postPresentAscii = presentAsciiPost;
 
 

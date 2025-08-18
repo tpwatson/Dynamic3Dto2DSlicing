@@ -66,6 +66,13 @@
     <label>Layer Res Scale (perf) <span class="val" id="v_resScale"></span></label>
     <input id="ctl_resScale" type="range" min="0.25" max="1" step="0.05">
     <label><input id="ctl_lockLayer" type="checkbox" checked> Lock Layer Max to View Far</label>
+    <label><input id="ctl_asciiOn" type="checkbox"> ASCII Mode</label>
+    <label>ASCII Cell Px <span class="val" id="v_asciiCell"></span></label>
+    <input id="ctl_asciiCell" type="range" min="4" max="48" step="1">
+    <label>ASCII Brightness <span class="val" id="v_asciiBright"></span></label>
+    <input id="ctl_asciiBright" type="range" min="0.5" max="3" step="0.05">
+    <label>ASCII Background Darken <span class="val" id="v_asciiDark"></span></label>
+    <input id="ctl_asciiDark" type="range" min="0" max="1" step="0.01">
   </div>
 </div>
   <div id="bandUi" style="margin-top:8px">
@@ -202,6 +209,13 @@ let WAVE_AMP = 0.0;       // meters of vertical offset
 let WAVE_SPEED = 2.0;     // radians per second
 let WAVE_PHASE = 0.6;     // radians phase difference per layer
 
+// ASCII post-processing
+let ASCII_ON = false;
+let ASCII_CELL_PX = 12;
+let ASCII_BRIGHTNESS = 1.6;
+let ASCII_BG_DARKEN = 0.9;
+let ASCII_GAMMA = 1.0;
+
 /*** ---------- WebGL2 Boilerplate ---------- ***/
 const canvas = document.getElementById('gl');
 const statusEl = document.getElementById('status');
@@ -218,6 +232,7 @@ function resize() {
   canvas.style.width = '100vw'; canvas.style.height = '100vh';
   // Recreate FBOs after gl is initialized in boot sequence
   if(typeof gl !== 'undefined' && gl){ if(typeof postCreateLayerTargets==='function') postCreateLayerTargets(gl, canvas.width, canvas.height, LAYERS, RES_SCALE); }
+  if(typeof gl !== 'undefined' && gl && ASCII_ON){ if(typeof postEnsureSceneTarget==='function') postEnsureSceneTarget(gl, canvas.width, canvas.height); }
 }
 resize(); addEventListener('resize', resize);
 
@@ -253,6 +268,10 @@ const ctlWavePhase = document.getElementById('ctl_wavePhase');
 const ctlLayerPasses = document.getElementById('ctl_layerPasses');
 const ctlResScale = document.getElementById('ctl_resScale');
 const ctlLockLayer = document.getElementById('ctl_lockLayer');
+const ctlAsciiOn = document.getElementById('ctl_asciiOn');
+const ctlAsciiCell = document.getElementById('ctl_asciiCell');
+const ctlAsciiBright = document.getElementById('ctl_asciiBright');
+const ctlAsciiDark = document.getElementById('ctl_asciiDark');
 const vViewFar = document.getElementById('v_viewFar');
 const vLayerMax = document.getElementById('v_layerMax');
 const vStroke = document.getElementById('v_stroke');
@@ -267,6 +286,9 @@ const vWaveSpeed = document.getElementById('v_waveSpeed');
 const vWavePhase = document.getElementById('v_wavePhase');
 const vLayerPasses = document.getElementById('v_layerPasses');
 const vResScale = document.getElementById('v_resScale');
+const vAsciiCell = document.getElementById('v_asciiCell');
+const vAsciiBright = document.getElementById('v_asciiBright');
+const vAsciiDark = document.getElementById('v_asciiDark');
 const bandsDiv = document.getElementById('bands');
 const uiRoot = document.getElementById('ui');
 const bandUiRoot = document.getElementById('bandUi');
@@ -296,6 +318,10 @@ function syncUI(){
   ctlLayerPasses.value = LAYER_PASSES;
   ctlResScale.value = RES_SCALE;
   ctlLockLayer.checked = LOCK_LAYER_TO_VIEW;
+  if(ctlAsciiOn){ ctlAsciiOn.checked = ASCII_ON; }
+  if(ctlAsciiCell){ ctlAsciiCell.value = ASCII_CELL_PX; }
+  if(ctlAsciiBright){ ctlAsciiBright.value = ASCII_BRIGHTNESS; }
+  if(ctlAsciiDark){ ctlAsciiDark.value = ASCII_BG_DARKEN; }
   if(ctlWaveOn){ ctlWaveOn.checked = WAVE_ON; }
   if(ctlWaveAmp){ ctlWaveAmp.value = WAVE_AMP; }
   if(ctlWaveSpeed){ ctlWaveSpeed.value = WAVE_SPEED; }
@@ -311,6 +337,9 @@ function syncUI(){
   vOutInt.textContent = OUTLINE_INTENSITY.toFixed(2);
   vLayerPasses.textContent = LAYER_PASSES.toString();
   vResScale.textContent = RES_SCALE.toFixed(2);
+  if(vAsciiCell) vAsciiCell.textContent = ASCII_CELL_PX.toFixed(0);
+  if(vAsciiBright) vAsciiBright.textContent = ASCII_BRIGHTNESS.toFixed(2);
+  if(vAsciiDark) vAsciiDark.textContent = ASCII_BG_DARKEN.toFixed(2);
   if(vWaveAmp) vWaveAmp.textContent = WAVE_AMP.toFixed(0);
   if(vWaveSpeed) vWaveSpeed.textContent = WAVE_SPEED.toFixed(2);
   if(vWavePhase) vWavePhase.textContent = WAVE_PHASE.toFixed(2);
@@ -370,6 +399,12 @@ if(ctlWavePhase){ ctlWavePhase.addEventListener('input', ()=>{ WAVE_PHASE = Numb
 ctlLockLayer.addEventListener('change', ()=>{ LOCK_LAYER_TO_VIEW = ctlLockLayer.checked; if(LOCK_LAYER_TO_VIEW){ LAYER_MAX_DIST = VIEW_FAR; ctlLayerMax.value = LAYER_MAX_DIST; vLayerMax.textContent = LAYER_MAX_DIST.toFixed(0);} });
 ctlViewFar.addEventListener('input', ()=>{ if(LOCK_LAYER_TO_VIEW){ LAYER_MAX_DIST = VIEW_FAR; ctlLayerMax.value = LAYER_MAX_DIST; vLayerMax.textContent = LAYER_MAX_DIST.toFixed(0);} });
 // Fog controls removed
+
+// ASCII controls
+if(ctlAsciiOn){ ctlAsciiOn.addEventListener('change', ()=>{ ASCII_ON = ctlAsciiOn.checked; if(ASCII_ON){ if(typeof postEnsureSceneTarget==='function') postEnsureSceneTarget(gl, canvas.width, canvas.height); } }); }
+if(ctlAsciiCell){ ctlAsciiCell.addEventListener('input', ()=>{ ASCII_CELL_PX = Number(ctlAsciiCell.value); if(vAsciiCell) vAsciiCell.textContent = ASCII_CELL_PX.toFixed(0); }); }
+if(ctlAsciiBright){ ctlAsciiBright.addEventListener('input', ()=>{ ASCII_BRIGHTNESS = Number(ctlAsciiBright.value); if(vAsciiBright) vAsciiBright.textContent = ASCII_BRIGHTNESS.toFixed(2); }); }
+if(ctlAsciiDark){ ctlAsciiDark.addEventListener('input', ()=>{ ASCII_BG_DARKEN = Number(ctlAsciiDark.value); if(vAsciiDark) vAsciiDark.textContent = ASCII_BG_DARKEN.toFixed(2); }); }
 
   // Freeze background toggle and start band selector (UI minimal: buttons)
   const freezeBtn = document.createElement('span'); freezeBtn.className='btn'; freezeBtn.style.marginLeft='6px'; freezeBtn.textContent='Freeze BG';
@@ -1005,8 +1040,13 @@ function frame(t){
     if(typeof postMarkBandRendered==='function') postMarkBandRendered(bandIndexToRender);
   }
 
-  // 2) Composite textures to screen as flat layers (nearest on top)
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  // 2) Composite to either scene FBO (ASCII) or default framebuffer
+  if(ASCII_ON && typeof postEnsureSceneTarget==='function' && typeof postBindSceneFbo==='function'){
+    postEnsureSceneTarget(gl, canvas.width, canvas.height);
+    postBindSceneFbo(gl);
+  } else {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
   gl.viewport(0,0,canvas.width,canvas.height);
   gl.disable(gl.DEPTH_TEST);
   gl.clearColor(0.0,0.0,0.0,1);
@@ -1015,7 +1055,7 @@ function frame(t){
   if(typeof drawSkyBackground === 'function') drawSkyBackground(gl, aspect, FOVY, getDir, canvas, SKYBOX_URL);
 
   // Fill background with solid color; skip fullscreen composition
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  // Keep target as set above (scene FBO or default)
   gl.viewport(0,0,canvas.width,canvas.height);
   gl.disable(gl.DEPTH_TEST);
   gl.clearColor(0.02,0.02,0.02,1);
@@ -1038,6 +1078,11 @@ function frame(t){
   // Sync mirror overlay tilt with card tilt
   const mirror = document.getElementById('mirrorOverlay');
   if(mirror){ mirror.style.transform = `translate(-50%, -50%)`; }
+
+  // If ASCII mode, present the ASCII post-process to screen now
+  if(ASCII_ON && typeof postPresentAscii==='function'){
+    postPresentAscii(gl, canvas.width, canvas.height, ASCII_CELL_PX, ASCII_BRIGHTNESS, ASCII_BG_DARKEN, ASCII_GAMMA);
+  }
 
   requestAnimationFrame(frame);
 }
