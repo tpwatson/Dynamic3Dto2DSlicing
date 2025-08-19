@@ -181,8 +181,8 @@ const EYE_HEIGHT = 2.0;     // not used in airplane mode
 const AFTERBURNER_MULT = 3.0;     // Shift
 const THRUST_BASE = 140.0;        // units/sec^2 at full throttle
 const DRAG_COEFF = 0.02;          // quadratic drag
-const MAX_SPEED = 380.0;          // soft cap; drag prevents exceeding much
-const TAKEOFF_SPEED = 45.0;       // must exceed and pitch up to leave ground
+const MAX_SPEED = 680.0;          // soft cap; drag prevents exceeding much
+const TAKEOFF_SPEED = 85.0;       // must exceed and pitch up to leave ground
 const PITCH_RATE = 0.9;           // rad/sec (Arrow Up/Down)
 const ROLL_RATE  = 1.8;           // rad/sec (A/D)
 const MAX_PITCH  = 0.6;           // ~34° up/down
@@ -614,11 +614,12 @@ float bandIndex(float d, float maxD, float N){
       float zEdge = fwidth(v_eyeZ / max(u_maxDist, 1e-3));
       float slope = 1.0 - abs(n.y);
       float slopeChange = fwidth(slope);
-      float rim = smoothstep(0.65, 0.92, 1.0 - abs(dot(n, V)));
-      rim *= smoothstep(0.25, 0.55, slope);
-      float edge = (nEdge * 1.0 + zEdge * 0.5 + slopeChange * 2.0 + rim * 1.2) * u_outlineScale;
-      float t0 = 0.045;
-      float t1 = 0.16;
+      // Strong silhouette term for models
+      float viewAlign = 1.0 - abs(dot(n, V)); // 0 = facing, 1 = silhouette
+      float sil = smoothstep(0.55, 0.92, viewAlign);
+      float edge = (nEdge * 1.0 + zEdge * 0.4 + slopeChange * 1.5 + sil * 2.0) * u_outlineScale;
+      float t0 = 0.035;
+      float t1 = 0.14;
       float edgeMask = smoothstep(t0, t1, edge);
       color = mix(color, vec3(0.0), clamp(edgeMask * u_outlineIntensity, 0.0, 1.0));
     }
