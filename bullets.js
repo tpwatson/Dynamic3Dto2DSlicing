@@ -117,10 +117,8 @@
     bullets.push({ pos:pLeft, vel:baseVel, ttl:BULLET_TTL, right, up, fwd, color });
     bullets.push({ pos:pRight, vel:baseVel, ttl:BULLET_TTL, right, up, fwd, color });
     // machine gun burst sound (mix alternating samples)
-    // Ensure only one MG instance plays at a time: stop any existing loop then start a short one-shot
-    if(typeof window.__mgActive==='number'){ /* noop counter */ }
-    const mgKey = 'mg2'; // fixed variant to avoid timbre switching
-    if(typeof soundsPlayOneShot==='function') soundsPlayOneShot(mgKey, { pos: planePos, volume: 0.45 });
+    // play a single-shot sample per emission so sound stops immediately when you stop firing
+    if(typeof soundsPlayOneShot==='function') soundsPlayOneShot('single1', { pos: planePos, volume: 1.5 });
   }
 
   function spawnImpact(pos, velHint){

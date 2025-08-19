@@ -29,11 +29,13 @@
 <body>
 <div id="uiToggle" class="btn">Hide UI (H)</div>
 <div id="ui">
-  <div><b>Airplane</b> — W/S throttle, A/D roll, Arrow Up/Down pitch, Shift afterburner. Plane starts on ground.</div>
+  <div><b>Airplane</b> — W/S throttle, A/D yaw (weak), Arrow Left/Right roll, Arrow Up/Down pitch, Shift afterburner. Plane starts on ground.</div>
   <div>Layers: 14 • Stroke size: 8px • 5% random variation</div>
   <div id="status">loading heightmap…</div>
   <div style="margin-top:6px"><span class="btn" id="recenter">Recenter (R)</span></div>
   <div style="margin-top:8px">
+    <label>Master Volume <span class="val" id="v_vol"></span></label>
+    <input id="ctl_vol" type="range" min="0" max="1" step="0.01">
     <label>View Far <span class="val" id="v_viewFar"></span></label>
     <input id="ctl_viewFar" type="range" min="50" max="500000" step="10">
     <label>Layer Max Dist <span class="val" id="v_layerMax"></span></label>
@@ -181,19 +183,20 @@ const KEY_LOOK_SPEED = 1.8; // not used in airplane mode
 const GRAV = 25.0;
 const EYE_HEIGHT = 2.0;     // not used in airplane mode
 // --- Airplane sim constants ---
-const AFTERBURNER_MULT = 3.0;     // Shift
+const AFTERBURNER_MULT = 9.0;     // Shift
 const THRUST_BASE = 180.0;        // base thrust accel
 const DRAG_COEFF = 0.025;         // quadratic drag (world units)
 const MAX_SPEED = 420.0;          // practical top in level flight
 const GRAVITY_ACC = 9.81 * 8.0;   // scaled gravity for game feel
 const LIFT_COEFF = 0.0125;        // simple lift ~ v^2 (tuned for ~80 m/s level flight)
 const TAKEOFF_SPEED = 45.0;       // must exceed and pitch up to leave ground
-const PITCH_RATE = 0.9;           // rad/sec (Arrow Up/Down)
-const ROLL_RATE  = 1.8;           // rad/sec (A/D)
-const MAX_PITCH  = 0.6;           // ~34° up/down
-const MAX_ROLL   = 1.2;           // ~69°
-const BANK_TURN_RATE = 2.8;       // yaw rad/sec contribution at full bank (scaled by speed)
-const MIN_TURN_RATE = 0.7;        // base yaw even at low speeds so A/D always changes heading
+const PITCH_RATE = 0.9 * 0.65;    // rad/sec (Arrow Up/Down) reduced ~65%
+const ROLL_RATE  = 1.8;           // rad/sec (Arrow Left/Right)
+const MAX_PITCH  = 999.0;         // unused (pitch now unbounded via forward-vector integration)
+const MAX_ROLL   = 999.0;         // unused (roll now unbounded)
+const BANK_TURN_RATE = 0.0;       // disable arcade auto-yaw from bank
+const MIN_TURN_RATE = 0.0;        // no base yaw
+const YAW_RATE = 1.6 * 0.10;      // yaw weakened by ~90%
 const ROLL_RETURN_RATE = 2.2;     // rad/sec return-to-level when no roll input
 const PLANE_CLEARANCE = 3.0;      // meters above terrain to consider "on ground"
 const CAMERA_FOLLOW_DIST = 70.0;  // meters behind plane
@@ -295,6 +298,7 @@ const ctlWaveSpeed = document.getElementById('ctl_waveSpeed');
 const ctlWavePhase = document.getElementById('ctl_wavePhase');
 const ctlLayerPasses = document.getElementById('ctl_layerPasses');
 const ctlResScale = document.getElementById('ctl_resScale');
+const ctlVol = document.getElementById('ctl_vol');
 const ctlLockLayer = document.getElementById('ctl_lockLayer');
 const ctlStarsSky = document.getElementById('ctl_starsSky');
 const ctlMoonOnSky = document.getElementById('ctl_moonOnSky');
@@ -317,6 +321,7 @@ const vWaveSpeed = document.getElementById('v_waveSpeed');
 const vWavePhase = document.getElementById('v_wavePhase');
 const vLayerPasses = document.getElementById('v_layerPasses');
 const vResScale = document.getElementById('v_resScale');
+const vVol = document.getElementById('v_vol');
 const vStarDensity = document.getElementById('v_starDensity');
 const vAsciiCell = document.getElementById('v_asciiCell');
 const vAsciiBright = document.getElementById('v_asciiBright');
@@ -361,6 +366,7 @@ function syncUI(){
   if(ctlWaveAmp){ ctlWaveAmp.value = WAVE_AMP; }
   if(ctlWaveSpeed){ ctlWaveSpeed.value = WAVE_SPEED; }
   if(ctlWavePhase){ ctlWavePhase.value = WAVE_PHASE; }
+  if(ctlVol){ ctlVol.value = 0.6; }
   vViewFar.textContent = VIEW_FAR.toFixed(0);
   vLayerMax.textContent = LAYER_MAX_DIST.toFixed(0);
   vStroke.textContent = STROKE_PX.toFixed(0);
@@ -379,6 +385,7 @@ function syncUI(){
   if(vWaveAmp) vWaveAmp.textContent = WAVE_AMP.toFixed(0);
   if(vWaveSpeed) vWaveSpeed.textContent = WAVE_SPEED.toFixed(2);
   if(vWavePhase) vWavePhase.textContent = WAVE_PHASE.toFixed(2);
+  if(vVol) vVol.textContent = (ctlVol?Number(ctlVol.value):0.6).toFixed(2);
 }
 syncUI();
 
@@ -448,6 +455,8 @@ if(ctlAsciiOn){ ctlAsciiOn.addEventListener('change', ()=>{ ASCII_ON = ctlAsciiO
 if(ctlAsciiCell){ ctlAsciiCell.addEventListener('input', ()=>{ ASCII_CELL_PX = Number(ctlAsciiCell.value); if(vAsciiCell) vAsciiCell.textContent = ASCII_CELL_PX.toFixed(0); }); }
 if(ctlAsciiBright){ ctlAsciiBright.addEventListener('input', ()=>{ ASCII_BRIGHTNESS = Number(ctlAsciiBright.value); if(vAsciiBright) vAsciiBright.textContent = ASCII_BRIGHTNESS.toFixed(2); }); }
 if(ctlAsciiDark){ ctlAsciiDark.addEventListener('input', ()=>{ ASCII_BG_DARKEN = Number(ctlAsciiDark.value); if(vAsciiDark) vAsciiDark.textContent = ASCII_BG_DARKEN.toFixed(2); }); }
+// Master volume
+if(ctlVol){ ctlVol.addEventListener('input', ()=>{ const v = Number(ctlVol.value); if(typeof soundsSetMasterVolume==='function') soundsSetMasterVolume(v); if(vVol) vVol.textContent = v.toFixed(2); }); }
 
   // Freeze background toggle and start band selector (UI minimal: buttons)
   const freezeBtn = document.createElement('span'); freezeBtn.className='btn'; freezeBtn.style.marginLeft='6px'; freezeBtn.textContent='Freeze BG';
@@ -798,6 +807,7 @@ let activeBand = -1; // -1 = all
 
 /*** ---------- Camera / Controls ---------- ***/
 let camPos = {x:0, y:60, z:-SIZE*0.8};
+let camUpHint = {x:0, y:1, z:0};
 let yaw = 0, pitch = 0; // maintained from camera target each frame
 // Airplane state
 let plane = { pos:{x:0,y:0,z:0}, vel:{x:0,y:0,z:0}, yaw:0, pitch:0, roll:0, speed:0, throttle:0, onGround:true };
@@ -864,8 +874,8 @@ function recenter(){
 }
 recenterBtn.onclick = recenter;
 
-canvas.addEventListener('click', ()=> canvas.requestPointerLock());
-canvas.addEventListener('click', ()=>{ if(typeof soundsResume==='function') soundsResume(); });
+canvas.addEventListener('click', ()=>{ canvas.requestPointerLock(); if(typeof soundsResume==='function') soundsResume(); });
+addEventListener('keydown', ()=>{ if(typeof soundsResume==='function') soundsResume(); }, { once: true });
 const MOUSE_LOOK_ENABLED = false; // disabled for airplane mode
 addEventListener('mousemove', e=>{
   if(MOUSE_LOOK_ENABLED && document.pointerLockElement === canvas){
@@ -990,38 +1000,60 @@ function tick(dt){
   plane.throttle = clamp(plane.throttle, 0, 1);
   const afterburner = keys['shift'] === true;
   const thrust = THRUST_BASE * plane.throttle * (afterburner ? AFTERBURNER_MULT : 1.0);
-  // Pitch
-  if(keys['arrowdown']) plane.pitch += PITCH_RATE * dt; // nose up
-  if(keys['arrowup'])   plane.pitch -= PITCH_RATE * dt; // nose down
-  plane.pitch = clamp(plane.pitch, -MAX_PITCH, MAX_PITCH);
-  // Roll with auto-return when no input
-  const rollInput = (keys['d']? 1 : 0) + (keys['a']? -1 : 0);
-  if(rollInput !== 0){
-    plane.roll += rollInput * ROLL_RATE * dt;
-  } else {
-    // spring back to level
-    const k = Math.min(1.0, ROLL_RETURN_RATE * dt);
-    plane.roll += (-plane.roll) * k;
+  // Pitch (body-frame): rotate forward around current right axis, then extract yaw/pitch
+  let pitchInput = 0;
+  // invert pitch input
+  if(keys['arrowdown']) pitchInput -= 1; // nose up
+  if(keys['arrowup'])   pitchInput += 1; // nose down
+  if(pitchInput !== 0){
+    const delta = PITCH_RATE * dt * pitchInput;
+    let fwdOri = normalize3(forwardFromEulerPlane(plane.yaw, plane.pitch));
+    let right0 = cross3({x:0,y:1,z:0}, fwdOri);
+    const rl = Math.hypot(right0.x, right0.y, right0.z);
+    if(rl < 1e-4){ right0 = {x:1,y:0,z:0}; }
+    right0 = normalize3(right0);
+    const right1 = rotateAroundAxis(right0, fwdOri, plane.roll);
+    const fwdNew = normalize3(rotateAroundAxis(fwdOri, right1, delta));
+    const newYaw = Math.atan2(fwdNew.x, -fwdNew.z);
+    const newPitch = Math.asin(fwdNew.y);
+    plane.pitch = newPitch; // no clamp: allow full loops (orientation is tracked via forward vector)
+    plane.yaw = newYaw;
   }
-  plane.roll = clamp(plane.roll, -MAX_ROLL, MAX_ROLL);
+  // Roll (about forward axis only)
+  const rollInput = (keys['arrowright']? 1 : 0) + (keys['arrowleft']? -1 : 0);
+  if(rollInput !== 0){ plane.roll += rollInput * ROLL_RATE * dt; }
 
   // --- Physics (vector) ---
-  // Banked turning (yaw induced by roll). Ensure a base yaw rate even at low speeds.
+  // Manual yaw via A/D only (weak)
   const speedNorm = clamp(plane.speed / MAX_SPEED, 0, 1);
-  const turnRate = MIN_TURN_RATE + BANK_TURN_RATE * speedNorm; // rad/sec at sin(roll)=1
-  plane.yaw += Math.sin(plane.roll) * turnRate * dt;
+  let yawInput = 0;
+  if(keys['a'])  yawInput -= 1;
+  if(keys['d']) yawInput += 1;
+  if(yawInput !== 0){ plane.yaw += YAW_RATE * yawInput * dt; }
 
   // Forward vector (nose direction)
   const fwd = forwardFromEulerPlane(plane.yaw, plane.pitch);
   // Forces: thrust along forward, gravity down, quadratic drag opposite velocity
   const thrustAcc = THRUST_BASE * plane.throttle * (afterburner ? AFTERBURNER_MULT : 1.0);
-  const ax = fwd.x * thrustAcc;
-  const az = fwd.z * thrustAcc;
+  let ax = fwd.x * thrustAcc;
+  let ay = fwd.y * thrustAcc - GRAVITY_ACC;
+  let az = fwd.z * thrustAcc;
   // Drag ~ v^2
   const vMag = Math.hypot(plane.vel.x, plane.vel.y, plane.vel.z);
-  // Simple lift: upward accel proportional to v^2, reduced as pitch approaches ±90°
-  const lift = LIFT_COEFF * vMag * vMag * Math.max(0.0, Math.cos(plane.pitch));
-  const ay = fwd.y * thrustAcc - GRAVITY_ACC + lift;
+  // Lift aligned with aircraft body up (perpendicular to wings), magnitude scales with v^2
+  // Reduce lift when wings are vertical (banked 90°) via dot(upBody, worldUp)
+  let right0L = cross3({x:0,y:1,z:0}, fwd);
+  const rlen = Math.hypot(right0L.x, right0L.y, right0L.z);
+  if(rlen < 1e-4){ right0L = {x:1,y:0,z:0}; }
+  right0L = normalize3(right0L);
+  const rightL = rotateAroundAxis(right0L, fwd, plane.roll);
+  const upBodyL = normalize3(cross3(fwd, rightL));
+  // Scale lift by the component of up that is away from gravity to reduce weird side-coupling when inverted
+  const upAlign = Math.max(0.0, upBodyL.y); // 0 when inverted/knife-edge, 1 when wings level
+  const liftMag = LIFT_COEFF * vMag * vMag * upAlign;
+  ax += upBodyL.x * liftMag;
+  ay += upBodyL.y * liftMag;
+  az += upBodyL.z * liftMag;
   if(vMag > 0){
     const dragMag = DRAG_COEFF * vMag * vMag;
     const inv = 1.0 / vMag;
@@ -1037,6 +1069,8 @@ function tick(dt){
   plane.pos.y += plane.vel.y * dt;
   plane.pos.z += plane.vel.z * dt;
   plane.speed = Math.hypot(plane.vel.x, plane.vel.y, plane.vel.z); // full speed magnitude
+
+  // No automatic roll damping; pilot fully controls roll
 
   // Altitude and takeoff/landing
   const groundYBase = sampleTerrainHeightAtWorld(plane.pos.x, plane.pos.z, SIZE);
@@ -1064,18 +1098,32 @@ function tick(dt){
     }
   }
 
-  // --- Camera follow (spring) ---
-  // Keep the camera behind the plane relative to plane forward, with a constant world-up height offset.
+  // --- Camera follow (loop-safe) ---
+  // Compute aircraft body basis consistent with render/model (roll about forward axis)
+  const fwdBody = normalize3(forwardFromEulerPlane(plane.yaw, plane.pitch));
+  let rightBody0 = cross3({x:0,y:1,z:0}, fwdBody);
+  const rbl = Math.hypot(rightBody0.x, rightBody0.y, rightBody0.z);
+  if(rbl < 1e-4){ rightBody0 = {x:1,y:0,z:0}; }
+  rightBody0 = normalize3(rightBody0);
+  const rightBody = rotateAroundAxis(rightBody0, fwdBody, plane.roll);
+  const upBody = normalize3(cross3(fwdBody, rightBody));
+  // When near vertical forward (|fwd.y| high), flip camera behind direction to keep plane in view
+  const nearVertical = Math.abs(fwd.y) > 0.82;
+  const back = { x: fwd.x, y: fwd.y, z: fwd.z };
   const camTarget = {
-    x: plane.pos.x - fwd.x * CAMERA_FOLLOW_DIST,
-    y: plane.pos.y + CAMERA_FOLLOW_HEIGHT,
-    z: plane.pos.z - fwd.z * CAMERA_FOLLOW_DIST,
+    x: plane.pos.x - back.x * CAMERA_FOLLOW_DIST,
+    y: plane.pos.y - back.y * CAMERA_FOLLOW_DIST * 0.2 + upBody.y * CAMERA_FOLLOW_HEIGHT,
+    z: plane.pos.z - back.z * CAMERA_FOLLOW_DIST,
   };
-  // Hard lock X/Z behind the plane; only smooth vertical for comfort
   const tY = 1 - Math.exp(-CAMERA_SPRING * dt);
   camPos.x = camTarget.x;
   camPos.z = camTarget.z;
   camPos.y += (camTarget.y - camPos.y) * tY;
+  // Smooth camera up hint toward aircraft up to avoid sudden flips
+  const upBlend = Math.min(1.0, CAMERA_ORIENT_SPRING * dt);
+  camUpHint.x = camUpHint.x * (1-upBlend) + upBody.x * upBlend;
+  camUpHint.y = camUpHint.y * (1-upBlend) + upBody.y * upBlend;
+  camUpHint.z = camUpHint.z * (1-upBlend) + upBody.z * upBlend;
 
   // Update player entity for renderer
   playerEntity.pos.x = plane.pos.x;
@@ -1084,13 +1132,10 @@ function tick(dt){
   playerEntity.yaw = plane.yaw + PLAYER_YAW_OFFSET;
   playerEntity.initialized = true;
 
-  // Derive camera yaw/pitch toward a point ahead of the plane so the camera stays behind it
-  const lookAhead = 120.0;
-  const lookPoint = { x: plane.pos.x + fwd.x * lookAhead, y: plane.pos.y + fwd.y * lookAhead * 0.15, z: plane.pos.z + fwd.z * lookAhead };
-  const toLook = normalize3({ x: lookPoint.x - camPos.x, y: lookPoint.y - camPos.y, z: lookPoint.z - camPos.z });
+  // Camera looks at the plane with up aligned to aircraft up; allows smooth flips
+  const toLook = normalize3({ x: plane.pos.x - camPos.x, y: plane.pos.y - camPos.y, z: plane.pos.z - camPos.z });
   const targetYaw = Math.atan2(toLook.x, -toLook.z);
   const targetPitch = Math.asin(-toLook.y);
-  // Directly set orientation to minimize orbital lag
   yaw = targetYaw;
   pitch = targetPitch;
 
@@ -1183,7 +1228,9 @@ function frame(t){
   const proj = perspective(FOVY, aspect, 0.1, VIEW_FAR);
   const f = getDir();
   const center = {x: camPos.x + f.x, y: camPos.y + f.y, z: camPos.z + f.z};
-  const view = lookAt(camPos, center, {x:0,y:1,z:0});
+  // Use aircraft-up-influenced camera up to avoid gimbal issues during loops
+  const upCam = normalize3(camUpHint);
+  const view = lookAt(camPos, center, {x:upCam.x, y:upCam.y, z:upCam.z});
   const model = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);
 
   gl.useProgram(prog);

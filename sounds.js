@@ -11,19 +11,26 @@
   let ctx = null;
   let buffers = {};
   let listenerPos = { x:0, y:0, z:0 };
+  let masterGain = null;
+  let masterVol = 0.6;
   const base = 'assets/sounds/';
   const manifest = {
     mg1: 'ww2_airplane_machinegun1.mp3',
     mg2: 'ww2_airplane_machinegun2.mp3',
     mg3: 'ww2_airplane_machinegun3.mp3',
-    eng: 'ww2_airplane_engine2.mp3',
+    eng: 'ww2_airplane_engine3.mp3',
+    single1: 'ww2_airplane_singleshot1.mp3',
     ric1: 'bullet_ricochet1.mp3',
     ric2: 'bullet_ricochet2.mp3',
     ric3: 'bullet_ricochet3.mp3',
     ric4: 'bullet_ricochet4.mp3',
   };
 
-  function ensureCtx(){ if(!ctx){ ctx = new (window.AudioContext||window.webkitAudioContext)(); } return ctx; }
+  function ensureCtx(){
+    if(!ctx){ ctx = new (window.AudioContext||window.webkitAudioContext)(); }
+    if(ctx && !masterGain){ masterGain = ctx.createGain(); masterGain.gain.value = masterVol; masterGain.connect(ctx.destination); }
+    return ctx;
+  }
 
   async function loadBuffer(url){
     const c = ensureCtx();
@@ -46,8 +53,8 @@
     const gain = c.createGain();
     gain.gain.value = (typeof volume==='number') ? volume : 1.0;
     const p = c.createStereoPanner ? c.createStereoPanner() : null;
-    if(p){ p.pan.value = (typeof pan==='number') ? pan : 0; gain.connect(p); p.connect(c.destination); return { in: gain, out: p };
-    } else { gain.connect(c.destination); return { in: gain, out: gain }; }
+    if(p){ p.pan.value = (typeof pan==='number') ? pan : 0; gain.connect(p); p.connect(masterGain); return { in: gain, out: p };
+    } else { gain.connect(masterGain); return { in: gain, out: gain }; }
   }
 
   function panVolForPos(pos){
@@ -90,6 +97,7 @@
     if(opts.rate != null){ try{ h.src.playbackRate.value = Math.max(0.25, Math.min(3.0, opts.rate)); }catch(e){} }
     if(opts.pan != null && h.chain && h.chain.out && 'pan' in h.chain.out){ try{ h.chain.out.pan.value = opts.pan; }catch(e){} }
   }
+  function soundsSetMasterVolume(v){ masterVol = Math.max(0, Math.min(1, Number(v)||0)); if(ensureCtx() && masterGain){ masterGain.gain.value = masterVol; } }
 
   window.soundsInit = soundsInit;
   window.soundsResume = soundsResume;
@@ -98,6 +106,7 @@
   window.soundsStartLoop = soundsStartLoop;
   window.soundsStopLoop = soundsStopLoop;
   window.soundsUpdateLoop = soundsUpdateLoop;
+  window.soundsSetMasterVolume = soundsSetMasterVolume;
 })();
 
 
