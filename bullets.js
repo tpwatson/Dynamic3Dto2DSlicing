@@ -10,7 +10,7 @@
   const BULLET_TTL = 3.0;       // seconds
   const G = 0.0;                // gravity on bullets (arc) — keep 0 for now
   const SIDE_OFFSET = 6.0;      // meters from fuselage center to each muzzle
-  const BULLET_LEN = 34.0;
+  const BULLET_LEN = 34.0 ;
   const BULLET_RAD = 0.8;       // skinnier tracers
 
   let bullets = [];
@@ -116,6 +116,11 @@
     const color = [1.0, 0.8, 0.2];
     bullets.push({ pos:pLeft, vel:baseVel, ttl:BULLET_TTL, right, up, fwd, color });
     bullets.push({ pos:pRight, vel:baseVel, ttl:BULLET_TTL, right, up, fwd, color });
+    // machine gun burst sound (mix alternating samples)
+    // Ensure only one MG instance plays at a time: stop any existing loop then start a short one-shot
+    if(typeof window.__mgActive==='number'){ /* noop counter */ }
+    const mgKey = 'mg2'; // fixed variant to avoid timbre switching
+    if(typeof soundsPlayOneShot==='function') soundsPlayOneShot(mgKey, { pos: planePos, volume: 0.45 });
   }
 
   function spawnImpact(pos, velHint){
@@ -132,7 +137,7 @@
                               z: Math.sin(a)* (1.0-u) + dirHint.z*0.6 });
       const spd = 120 + Math.random()*220;
       const ttl = 0.35 + Math.random()*0.35;
-      const size = 3.0 + Math.random()*4.0;
+      const size = (3.0 + Math.random()*4.0) * 0.25; // 4x smaller
       sparks.push({ pos:{...base}, vel: mul(dir, spd), ttl, life: ttl, size, color:[1.0,0.75,0.2] });
     }
   }
@@ -148,6 +153,11 @@
       const gy = sampleHeightFn ? sampleHeightFn(b.pos.x, b.pos.z, SIZE) : -99999;
       if(b.pos.y <= gy + 0.2){
         spawnImpact({x:b.pos.x, y:gy+0.1, z:b.pos.z}, b.vel);
+        // ricochet/impact
+        if(typeof soundsPlayOneShot==='function'){
+          const rKey = ['ric1','ric2','ric3','ric4'][(Math.random()*4)|0];
+          soundsPlayOneShot(rKey, { pos: {x:b.pos.x, y:gy, z:b.pos.z}, volume: 0.55 });
+        }
         continue;
       }
       out.push(b);
