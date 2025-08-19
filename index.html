@@ -35,9 +35,9 @@
   <div style="margin-top:6px"><span class="btn" id="recenter">Recenter (R)</span></div>
   <div style="margin-top:8px">
     <label>View Far <span class="val" id="v_viewFar"></span></label>
-    <input id="ctl_viewFar" type="range" min="50" max="50000" step="10">
+    <input id="ctl_viewFar" type="range" min="50" max="500000" step="10">
     <label>Layer Max Dist <span class="val" id="v_layerMax"></span></label>
-    <input id="ctl_layerMax" type="range" min="50" max="50000" step="10">
+    <input id="ctl_layerMax" type="range" min="50" max="500000" step="10">
     <label>Stroke Px <span class="val" id="v_stroke"></span></label>
     <input id="ctl_stroke" type="range" min="2" max="48" step="1">
     <label>Variation <span class="val" id="v_var"></span></label>
@@ -181,8 +181,8 @@ const EYE_HEIGHT = 2.0;     // not used in airplane mode
 const AFTERBURNER_MULT = 3.0;     // Shift
 const THRUST_BASE = 140.0;        // units/sec^2 at full throttle
 const DRAG_COEFF = 0.02;          // quadratic drag
-const MAX_SPEED = 680.0;          // soft cap; drag prevents exceeding much
-const TAKEOFF_SPEED = 85.0;       // must exceed and pitch up to leave ground
+const MAX_SPEED = 380.0;          // soft cap; drag prevents exceeding much
+const TAKEOFF_SPEED = 45.0;       // must exceed and pitch up to leave ground
 const PITCH_RATE = 0.9;           // rad/sec (Arrow Up/Down)
 const ROLL_RATE  = 1.8;           // rad/sec (A/D)
 const MAX_PITCH  = 0.6;           // ~34° up/down
@@ -214,10 +214,10 @@ const LAYERS = 14;
 let VIEW_FAR = 50000.0;          // extend far plane for full terrain visibility
 let LAYER_MAX_DIST = 50000.0;    // match view distance so all bands cover horizon
 let STROKE_PX = 4.0;          // base “pixel/brush” size (screen-space)
-let VARIATION = 0.05;         // subtle variation
+let VARIATION = 0.00;         // subtle variation
 let CHECKER_SIZE = 4.0;      // world units per checker cell
-let CHECKER_ALPHA = 0.0;      // disable overlay for maximum clarity
- let CHECKER_SCREEN = true;     // when true, draw checker in screen-space per layer
+let CHECKER_ALPHA = 0.04;      // disable overlay for maximum clarity
+ let CHECKER_SCREEN = false;     // when true, draw checker in screen-space per layer
 // Outline defaults
 let OUTLINE_ON = true;
 let OUTLINE_SCALE = 4;       // sensitivity multiplier (higher catches more edges)
@@ -729,7 +729,7 @@ float bandIndex(float d, float maxD, float N){
     // Darken towards black on edges before applying coverage
     col = mix(col, vec3(0.0), clamp(edgeMask * u_outlineIntensity, 0.0, 1.0));
   }
-  o_color = vec4(mix(paper, col, coverage), coverage);
+  o_color = vec4(mix(paper, col, coverage), 1.0);
 }
 `;
 
@@ -1234,6 +1234,8 @@ function frame(t){
       }
       gl.uniformMatrix4fv(loc.u_model,false,model);
       gl.uniform1i(loc.u_renderMode, 0);
+      // Restore terrain VAO for subsequent passes/bands
+      gl.bindVertexArray(vao);
     } else {
       gl.uniformMatrix4fv(loc.u_model,false,model);
     }
