@@ -94,6 +94,7 @@
 <script src="skybox.js"></script>
 <script src="terrain.js"></script>
 <script src="clouds.js"></script>
+<script src="bullets.js"></script>
 <script src="postcompose.js"></script>
 <script src="gltf.js"></script>
 
@@ -1067,6 +1068,17 @@ function tick(dt){
   // Directly set orientation to minimize orbital lag
   yaw = targetYaw;
   pitch = targetPitch;
+
+  // Fire bullets on space press (auto-repeat while held with simple rate limit)
+  const nowFire = keys[' '] === true || keys['space'] === true;
+  tick.fireCooldown = (tick.fireCooldown||0) - dt;
+  if(nowFire && tick.fireCooldown <= 0){
+    if(typeof bulletsSpawnPair === 'function'){
+      bulletsSpawnPair({x:plane.pos.x, y:plane.pos.y, z:plane.pos.z}, plane.yaw, plane.pitch, plane.roll, plane.speed);
+    }
+    tick.fireCooldown = 0.12; // 8.3 rounds/sec
+  }
+  if(typeof bulletsUpdate === 'function') bulletsUpdate(dt, SIZE, (wx,wz,S)=> sampleTerrainHeightAtWorld(wx, wz, S));
 }
 
 /*** ---------- Matrices ---------- ***/
@@ -1250,6 +1262,11 @@ function frame(t){
       gl.uniform1f(loc.u_alpha, 1.0);
       gl.uniform1i(loc.u_renderMode, 0);
       // Restore terrain VAO for any subsequent draws
+      gl.bindVertexArray(vao);
+    }
+    // Bullets
+    if(typeof bulletsDrawPass === 'function'){
+      bulletsDrawPass(gl, loc, bandIndexToRender);
       gl.bindVertexArray(vao);
     }
     if(typeof postMarkBandRendered==='function') postMarkBandRendered(bandIndexToRender);
@@ -1456,6 +1473,8 @@ function loadImage(url){
     if(typeof setProceduralSky === 'function') setProceduralSky(true);
     // Provide alpha mask texture for card clipping
     if(typeof postSetMirrorMaskTexture === 'function') postSetMirrorMaskTexture(gl, maskImg);
+    // Initialize bullets
+    if(typeof bulletsInit === 'function') bulletsInit(gl);
     // Load player glTF model
     try{
       const res = await loadGltf(gl, 'assets/3d/player/scene.gltf', { a_pos: 0, a_col: 1, a_norm: 2 });
