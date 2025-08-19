@@ -8,7 +8,7 @@
 (function(){
   const BULLET_SPEED = 1950.0;  // m/s initial speed added to plane forward (3x)
   const BULLET_TTL = 3.0;       // seconds
-  const G = 0.0;                // gravity on bullets (arc) — keep 0 for now
+  const G = 9.81 * 8.0;         // gravity on bullets for visible arc
   const SIDE_OFFSET = 6.0;      // meters from fuselage center to each muzzle
   const BULLET_LEN = 34.0 ;
   const BULLET_RAD = 0.8;       // skinnier tracers

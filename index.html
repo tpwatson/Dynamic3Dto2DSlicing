@@ -182,9 +182,11 @@ const GRAV = 25.0;
 const EYE_HEIGHT = 2.0;     // not used in airplane mode
 // --- Airplane sim constants ---
 const AFTERBURNER_MULT = 3.0;     // Shift
-const THRUST_BASE = 140.0;        // units/sec^2 at full throttle
-const DRAG_COEFF = 0.02;          // quadratic drag
-const MAX_SPEED = 380.0;          // soft cap; drag prevents exceeding much
+const THRUST_BASE = 180.0;        // base thrust accel
+const DRAG_COEFF = 0.025;         // quadratic drag (world units)
+const MAX_SPEED = 420.0;          // practical top in level flight
+const GRAVITY_ACC = 9.81 * 8.0;   // scaled gravity for game feel
+const LIFT_COEFF = 0.0125;        // simple lift ~ v^2 (tuned for ~80 m/s level flight)
 const TAKEOFF_SPEED = 45.0;       // must exceed and pitch up to leave ground
 const PITCH_RATE = 0.9;           // rad/sec (Arrow Up/Down)
 const ROLL_RATE  = 1.8;           // rad/sec (A/D)
@@ -798,7 +800,7 @@ let activeBand = -1; // -1 = all
 let camPos = {x:0, y:60, z:-SIZE*0.8};
 let yaw = 0, pitch = 0; // maintained from camera target each frame
 // Airplane state
-let plane = { pos:{x:0,y:0,z:0}, yaw:0, pitch:0, roll:0, speed:0, throttle:0, onGround:true };
+let plane = { pos:{x:0,y:0,z:0}, vel:{x:0,y:0,z:0}, yaw:0, pitch:0, roll:0, speed:0, throttle:0, onGround:true };
 let engineLoop = null; // audio handle for engine
 let mgLoop = null;     // reserved if we switch to looped MG later
 // Diorama card tilt (radians)
@@ -1003,42 +1005,60 @@ function tick(dt){
   }
   plane.roll = clamp(plane.roll, -MAX_ROLL, MAX_ROLL);
 
-  // --- Physics ---
-  // Speed integration with drag
-  const drag = DRAG_COEFF * plane.speed * plane.speed;
-  plane.speed += (thrust - drag) * dt;
-  plane.speed = clamp(plane.speed, 0, MAX_SPEED);
-
+  // --- Physics (vector) ---
   // Banked turning (yaw induced by roll). Ensure a base yaw rate even at low speeds.
   const speedNorm = clamp(plane.speed / MAX_SPEED, 0, 1);
   const turnRate = MIN_TURN_RATE + BANK_TURN_RATE * speedNorm; // rad/sec at sin(roll)=1
   plane.yaw += Math.sin(plane.roll) * turnRate * dt;
 
-  // Forward vector in world (plane orientation drives movement; camera is passive)
+  // Forward vector (nose direction)
   const fwd = forwardFromEulerPlane(plane.yaw, plane.pitch);
-  // Move
-  plane.pos.x += fwd.x * plane.speed * dt;
-  plane.pos.z += fwd.z * plane.speed * dt;
+  // Forces: thrust along forward, gravity down, quadratic drag opposite velocity
+  const thrustAcc = THRUST_BASE * plane.throttle * (afterburner ? AFTERBURNER_MULT : 1.0);
+  const ax = fwd.x * thrustAcc;
+  const az = fwd.z * thrustAcc;
+  // Drag ~ v^2
+  const vMag = Math.hypot(plane.vel.x, plane.vel.y, plane.vel.z);
+  // Simple lift: upward accel proportional to v^2, reduced as pitch approaches ±90°
+  const lift = LIFT_COEFF * vMag * vMag * Math.max(0.0, Math.cos(plane.pitch));
+  const ay = fwd.y * thrustAcc - GRAVITY_ACC + lift;
+  if(vMag > 0){
+    const dragMag = DRAG_COEFF * vMag * vMag;
+    const inv = 1.0 / vMag;
+    const dx = plane.vel.x * inv, dy = plane.vel.y * inv, dz = plane.vel.z * inv;
+    plane.vel.x += (ax - dx * dragMag) * dt;
+    plane.vel.y += (ay - dy * dragMag) * dt;
+    plane.vel.z += (az - dz * dragMag) * dt;
+  } else {
+    plane.vel.x += ax * dt; plane.vel.y += ay * dt; plane.vel.z += az * dt;
+  }
+  // Integrate position
+  plane.pos.x += plane.vel.x * dt;
+  plane.pos.y += plane.vel.y * dt;
+  plane.pos.z += plane.vel.z * dt;
+  plane.speed = Math.hypot(plane.vel.x, plane.vel.y, plane.vel.z); // full speed magnitude
+
   // Altitude and takeoff/landing
   const groundYBase = sampleTerrainHeightAtWorld(plane.pos.x, plane.pos.z, SIZE);
   const groundY = WAVE_ON ? (groundYBase + Math.sin(gTimeSec * WAVE_SPEED) * WAVE_AMP) : groundYBase;
   if(plane.onGround){
     plane.pos.y = groundY + PLANE_CLEARANCE;
+    // stick to ground while onGround; kill vertical velocity
+    plane.vel.y = 0;
     // Allow takeoff once fast enough and pitching up
-    if(plane.speed > TAKEOFF_SPEED && plane.pitch > 0.08){ plane.onGround = false; }
+    if(plane.speed > TAKEOFF_SPEED * 0.9 && plane.pitch > 0.05){ plane.onGround = false; }
     // Auto-damp roll while on ground
     plane.roll *= Math.max(0, 1 - 4.0*dt);
     } else {
-    // Free flight: climb/sink via pitch; mild gravity sink
-    plane.pos.y += fwd.y * plane.speed * dt;
-    plane.pos.y -= GRAV * 0.05 * dt;
+    // Free flight already integrated above. Ground collision check below.
     // Hard ground collision
     const minY = groundY + PLANE_CLEARANCE;
     if(plane.pos.y <= minY){
       plane.pos.y = minY;
       plane.onGround = true;
       // frictional speed bleed on touchdown
-      plane.speed *= 0.85;
+      plane.vel.x *= 0.6; plane.vel.z *= 0.6; plane.vel.y = 0;
+      plane.speed = Math.hypot(plane.vel.x, plane.vel.z);
       // flatten pitch on touchdown over time
       plane.pitch *= 0.5;
     }
