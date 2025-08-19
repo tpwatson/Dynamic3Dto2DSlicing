@@ -93,6 +93,7 @@
 <script src="joystick.js"></script>
 <script src="skybox.js"></script>
 <script src="terrain.js"></script>
+<script src="clouds.js"></script>
 <script src="postcompose.js"></script>
 <script src="gltf.js"></script>
 
@@ -528,6 +529,7 @@ uniform float u_checkerAlpha; // opacity of checker overlay
   uniform bool  u_checkerScreen; // when true, checker grid is screen-space per band
 uniform int   u_activeBand; // -1 = render all; 0..13 = only that band (others discard)
 uniform int   u_renderMode; // 0 = terrain stylized, 1 = model (lit PBR-ish)
+uniform float u_alpha;      // global alpha for current draw (1 for opaque)
 // Outline controls
 // Model material uniforms
 uniform vec3  u_baseColor;   // model base color (albedo)
@@ -623,7 +625,7 @@ float bandIndex(float d, float maxD, float N){
       float edgeMask = smoothstep(t0, t1, edge);
       color = mix(color, vec3(0.0), clamp(edgeMask * u_outlineIntensity, 0.0, 1.0));
     }
-    o_color = vec4(color, 1.0);
+    o_color = vec4(color, clamp(u_alpha, 0.0, 1.0));
     return;
   }
 
@@ -729,7 +731,7 @@ float bandIndex(float d, float maxD, float N){
     // Darken towards black on edges before applying coverage
     col = mix(col, vec3(0.0), clamp(edgeMask * u_outlineIntensity, 0.0, 1.0));
   }
-  o_color = vec4(mix(paper, col, coverage), 1.0);
+  o_color = vec4(mix(paper, col, coverage), clamp(u_alpha, 0.0, 1.0));
 }
 `;
 
@@ -760,6 +762,7 @@ const loc = {
   u_checkerScreen: gl.getUniformLocation(prog,'u_checkerScreen'),
   u_activeBand: gl.getUniformLocation(prog,'u_activeBand'),
   u_renderMode: gl.getUniformLocation(prog,'u_renderMode'),
+  u_alpha: gl.getUniformLocation(prog,'u_alpha'),
   u_baseColor: gl.getUniformLocation(prog,'u_baseColor'),
   u_metallic: gl.getUniformLocation(prog,'u_metallic'),
   u_roughness: gl.getUniformLocation(prog,'u_roughness'),
@@ -1138,6 +1141,7 @@ function frame(t){
   gl.uniform1f(loc.u_time, t*0.001);
   gl.uniform1f(loc.u_strokePx, STROKE_PX);
   gl.uniform1f(loc.u_variation, VARIATION);
+  gl.uniform1f(loc.u_alpha, 1.0);
   // we will set activeBand per-pass below
   // Lighting uniforms
   const lightDir = normalizeVec3([-0.6, -1.0, -0.4]); // coming from above-left
@@ -1238,6 +1242,15 @@ function frame(t){
       gl.bindVertexArray(vao);
     } else {
       gl.uniformMatrix4fv(loc.u_model,false,model);
+    }
+    // Clouds (semi-transparent white blocks) drawn after terrain and model
+    if(typeof cloudsDrawPass === 'function'){
+      gl.uniform1f(loc.u_alpha, 0.7);
+      cloudsDrawPass(gl, loc, bandIndexToRender, camPos, SIZE, gTimeSec);
+      gl.uniform1f(loc.u_alpha, 1.0);
+      gl.uniform1i(loc.u_renderMode, 0);
+      // Restore terrain VAO for any subsequent draws
+      gl.bindVertexArray(vao);
     }
     if(typeof postMarkBandRendered==='function') postMarkBandRendered(bandIndexToRender);
   }
@@ -1435,6 +1448,8 @@ function loadImage(url){
     }
     // Ensure plane and camera are initialized on the ground ASAP
     recenter();
+    // Initialize clouds once GL and SIZE are known
+    if(typeof cloudsInit === 'function'){ cloudsInit(gl, SIZE); }
     // Setup sky texture (via skybox.js if available)
     if(skyImg && typeof createSkyTexture === 'function') createSkyTexture(gl, skyImg);
     // Prefer textured sky by default when available
