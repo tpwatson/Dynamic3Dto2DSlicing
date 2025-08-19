@@ -1452,8 +1452,8 @@ function loadImage(url){
     if(typeof cloudsInit === 'function'){ cloudsInit(gl, SIZE); }
     // Setup sky texture (via skybox.js if available)
     if(skyImg && typeof createSkyTexture === 'function') createSkyTexture(gl, skyImg);
-    // Prefer textured sky by default when available
-    if(typeof setProceduralSky === 'function') setProceduralSky(false);
+    // Prefer procedural gradient sky for daylight look
+    if(typeof setProceduralSky === 'function') setProceduralSky(true);
     // Provide alpha mask texture for card clipping
     if(typeof postSetMirrorMaskTexture === 'function') postSetMirrorMaskTexture(gl, maskImg);
     // Load player glTF model

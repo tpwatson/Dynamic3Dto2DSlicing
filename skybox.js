@@ -10,16 +10,19 @@ let fsVaoSky = null, fsVboSky = null;
 let useProceduralSky = true;
 let procOptions = {
   starDensity: 900.0,   // grid scale (higher = more cells)
-  starProb: 0.018,      // probability per cell
+  starProb: 0.0,        // probability per cell (0 for daytime look)
   starSize: 0.36,       // star core size (cell space)
   starSharp: 3.0,       // sharpness of points
   twinkleSpeed: 0.8,    // twinkle rate
   twinkleAmp: 0.25,     // twinkle amplitude
   starTint: [0.90, 0.95, 1.0], // slightly blue-white
-  moonOn: true,
+  moonOn: false,
   moonRadiusDeg: 0.55,  // apparent radius in degrees
   moonBrightness: 2.2,
   moonHue: [1.0, 0.98, 0.94],
+  // Light blue overcast gradient
+  baseTop:    [0.68, 0.80, 0.90],
+  baseBottom: [0.60, 0.73, 0.86],
 };
 
 function ensureFullscreenGeomSky(gl){
@@ -47,7 +50,98 @@ function linkSky(gl, vs, fs){ const p = gl.createProgram(); gl.attachShader(p, v
 function initSkyProgram(gl){
   if(skyProg) return;
   const VSQ = `#version 300 es\nlayout(location=0) in vec2 a_pos;\nlayout(location=1) in vec2 a_uv;\nout vec2 v_uv;\nvoid main(){ v_uv = a_uv; gl_Position = vec4(a_pos,0.0,1.0); }`;
-  const FSS = `#version 300 es\nprecision highp float;\n\n in vec2 v_uv;\n\n uniform sampler2D u_sky;\n uniform vec3 u_right;\n uniform vec3 u_up;\n uniform vec3 u_forward;\n uniform float u_aspect;\n uniform float u_tanHalfFovY;\n uniform int   u_useProc;\n // Procedural uniforms\n uniform float u_time;\n uniform float u_starDensity;\n uniform float u_starProb;\n uniform float u_starSize;\n uniform float u_starSharp;\n uniform float u_twinkleSpeed;\n uniform float u_twinkleAmp;\n uniform vec3  u_starTint;\n uniform int   u_moonOn;\n uniform float u_moonRadius;\n uniform float u_moonBrightness;\n uniform vec3  u_moonHue;\n\n out vec4 o_color;\n\n float hash21(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }\n vec2  hash22(vec2 p){ float n = sin(dot(p, vec2(127.1,311.7))); return fract(vec2(262144.0,32768.0) * n); }\n\n float starResponse(vec2 p, float size, float sharp){\n   float base = exp(-dot(p,p) / (size*size*0.15));\n   float ax = exp(-pow(abs(p.x), sharp) / size) + exp(-pow(abs(p.y), sharp) / size);\n   float c = cos(3.14159265/3.0), s = sin(3.14159265/3.0);\n   mat2 R = mat2(c,-s,s,c);\n   vec2 p2 = R*p; vec2 p3 = R*p2;\n   float a1 = exp(-pow(abs(p2.x), sharp) / size) + exp(-pow(abs(p2.y), sharp) / size);\n   float a2 = exp(-pow(abs(p3.x), sharp) / size) + exp(-pow(abs(p3.y), sharp) / size);\n   return base + 0.6*ax + 0.45*a1 + 0.45*a2;\n }\n\n void main(){\n   vec2 ndc = v_uv * 2.0 - 1.0;\n   vec3 dirCam = normalize(vec3(ndc.x * u_aspect * u_tanHalfFovY, ndc.y * u_tanHalfFovY, -1.0));\n   vec3 dirWorld = normalize(u_right * dirCam.x + u_up * dirCam.y + u_forward * dirCam.z);\n   float pi = 3.14159265358979323846;\n   float yaw = atan(dirWorld.x, -dirWorld.z);\n   float pitch = asin(clamp(dirWorld.y, -1.0, 1.0));\n   vec2 uvSky = vec2(yaw / (2.0*pi) + 0.5, 0.5 - (pitch / pi));\n\n   if(u_useProc == 0){\n     vec3 colT = texture(u_sky, uvSky).rgb;\n     o_color = vec4(colT, 1.0);\n     return;\n   }\n\n   vec3 col = vec3(0.0);\n   vec2 cellCoord = uvSky * u_starDensity;\n   vec2 cellId = floor(cellCoord);\n   vec2 f = fract(cellCoord) - 0.5;\n   float r = hash21(cellId);\n   if(r < u_starProb){\n     vec2 jitter = (hash22(cellId) - 0.5) * 0.7;\n     vec2 p = f - jitter;\n     float tw = 1.0 + u_twinkleAmp * sin(u_time * u_twinkleSpeed + r * 31.7);\n     float resp = starResponse(p, u_starSize, u_starSharp) * tw;\n     float inten = mix(0.65, 1.0, r);\n     col += u_starTint * resp * inten;\n   }\n\n   if(u_moonOn == 1){\n     float yawM = u_time * 0.03;\n     float pitchM = 0.28;\n     vec3 moonDir = normalize(vec3(cos(yawM), sin(pitchM), sin(yawM)));\n     float cosAng = clamp(dot(dirWorld, moonDir), -1.0, 1.0);\n     float ang = acos(cosAng);\n     float rim = smoothstep(u_moonRadius, u_moonRadius*0.8, ang);\n     float core = smoothstep(u_moonRadius*0.6, u_moonRadius*0.2, ang);\n     vec3 moon = u_moonHue * (core * u_moonBrightness + rim * (u_moonBrightness*0.25));\n     col += moon;\n   }\n\n   col = clamp(col, 0.0, 1.0);\n   o_color = vec4(col, 1.0);\n }`;
+  const FSS = `#version 300 es
+precision highp float;
+
+ in vec2 v_uv;
+
+ uniform sampler2D u_sky;
+ uniform vec3 u_right;
+ uniform vec3 u_up;
+ uniform vec3 u_forward;
+ uniform float u_aspect;
+ uniform float u_tanHalfFovY;
+ uniform int   u_useProc;
+ // Procedural uniforms
+ uniform float u_time;
+ uniform float u_starDensity;
+ uniform float u_starProb;
+ uniform float u_starSize;
+ uniform float u_starSharp;
+ uniform float u_twinkleSpeed;
+ uniform float u_twinkleAmp;
+ uniform vec3  u_starTint;
+ uniform int   u_moonOn;
+ uniform float u_moonRadius;
+ uniform float u_moonBrightness;
+ uniform vec3  u_moonHue;
+ uniform vec3  u_baseTop;
+ uniform vec3  u_baseBottom;
+
+ out vec4 o_color;
+
+ float hash21(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
+ vec2  hash22(vec2 p){ float n = sin(dot(p, vec2(127.1,311.7))); return fract(vec2(262144.0,32768.0) * n); }
+
+ float starResponse(vec2 p, float size, float sharp){
+   float base = exp(-dot(p,p) / (size*size*0.15));
+   float ax = exp(-pow(abs(p.x), sharp) / size) + exp(-pow(abs(p.y), sharp) / size);
+   float c = cos(3.14159265/3.0), s = sin(3.14159265/3.0);
+   mat2 R = mat2(c,-s,s,c);
+   vec2 p2 = R*p; vec2 p3 = R*p2;
+   float a1 = exp(-pow(abs(p2.x), sharp) / size) + exp(-pow(abs(p2.y), sharp) / size);
+   float a2 = exp(-pow(abs(p3.x), sharp) / size) + exp(-pow(abs(p3.y), sharp) / size);
+   return base + 0.6*ax + 0.45*a1 + 0.45*a2;
+ }
+
+ void main(){
+   vec2 ndc = v_uv * 2.0 - 1.0;
+   vec3 dirCam = normalize(vec3(ndc.x * u_aspect * u_tanHalfFovY, ndc.y * u_tanHalfFovY, -1.0));
+   vec3 dirWorld = normalize(u_right * dirCam.x + u_up * dirCam.y + u_forward * dirCam.z);
+   float pi = 3.14159265358979323846;
+   float yaw = atan(dirWorld.x, -dirWorld.z);
+   float pitch = asin(clamp(dirWorld.y, -1.0, 1.0));
+   vec2 uvSky = vec2(yaw / (2.0*pi) + 0.5, 0.5 - (pitch / pi));
+
+   if(u_useProc == 0){
+     vec3 colT = texture(u_sky, uvSky).rgb;
+     o_color = vec4(colT, 1.0);
+     return;
+   }
+
+   // Overcast light-blue gradient base
+   float t = clamp(dirWorld.y * 0.55 + 0.5, 0.0, 1.0);
+   vec3 col = mix(u_baseBottom, u_baseTop, t);
+
+   // Optional stars (usually off)
+   vec2 cellCoord = uvSky * u_starDensity;
+   vec2 cellId = floor(cellCoord);
+   vec2 f = fract(cellCoord) - 0.5;
+   float r = hash21(cellId);
+   if(r < u_starProb){
+     vec2 jitter = (hash22(cellId) - 0.5) * 0.7;
+     vec2 p = f - jitter;
+     float tw = 1.0 + u_twinkleAmp * sin(u_time * u_twinkleSpeed + r * 31.7);
+     float resp = starResponse(p, u_starSize, u_starSharp) * tw;
+     float inten = mix(0.65, 1.0, r);
+     col += u_starTint * resp * inten;
+   }
+
+   if(u_moonOn == 1){
+     float yawM = u_time * 0.03;
+     float pitchM = 0.28;
+     vec3 moonDir = normalize(vec3(cos(yawM), sin(pitchM), sin(yawM)));
+     float cosAng = clamp(dot(dirWorld, moonDir), -1.0, 1.0);
+     float ang = acos(cosAng);
+     float rim = smoothstep(u_moonRadius, u_moonRadius*0.8, ang);
+     float core = smoothstep(u_moonRadius*0.6, u_moonRadius*0.2, ang);
+     vec3 moon = u_moonHue * (core * u_moonBrightness + rim * (u_moonBrightness*0.25));
+     col += moon;
+   }
+
+   col = clamp(col, 0.0, 1.0);
+   o_color = vec4(col, 1.0);
+ }`;
   const v = compileSky(gl, gl.VERTEX_SHADER, VSQ);
   const f = compileSky(gl, gl.FRAGMENT_SHADER, FSS);
   skyProg = linkSky(gl, v, f);
@@ -71,6 +165,8 @@ function initSkyProgram(gl){
     u_moonRadius: gl.getUniformLocation(skyProg, 'u_moonRadius'),
     u_moonBrightness: gl.getUniformLocation(skyProg, 'u_moonBrightness'),
     u_moonHue: gl.getUniformLocation(skyProg, 'u_moonHue'),
+    u_baseTop: gl.getUniformLocation(skyProg, 'u_baseTop'),
+    u_baseBottom: gl.getUniformLocation(skyProg, 'u_baseBottom'),
   };
 }
 
@@ -124,6 +220,8 @@ function drawSkyBackground(gl, aspect, fovy, getDir, canvas, SKYBOX_URL_UNUSED){
     gl.uniform1f(skyLoc.u_moonRadius, rad);
     gl.uniform1f(skyLoc.u_moonBrightness, procOptions.moonBrightness);
     gl.uniform3f(skyLoc.u_moonHue, procOptions.moonHue[0], procOptions.moonHue[1], procOptions.moonHue[2]);
+    if(skyLoc.u_baseTop) gl.uniform3f(skyLoc.u_baseTop, procOptions.baseTop[0], procOptions.baseTop[1], procOptions.baseTop[2]);
+    if(skyLoc.u_baseBottom) gl.uniform3f(skyLoc.u_baseBottom, procOptions.baseBottom[0], procOptions.baseBottom[1], procOptions.baseBottom[2]);
   } else {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, skyTex);
