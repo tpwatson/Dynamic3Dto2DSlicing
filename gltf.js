@@ -156,6 +156,41 @@
       const bin = binDatas[view.buffer];
       buffers[i] = createBufferFromView(gl, bin, view);
     }
+    // Load images and create GL textures (if any)
+    async function loadImageElement(src){
+      return new Promise((resolve, reject)=>{
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = ()=> resolve(img);
+        img.onerror = reject;
+        img.src = src;
+      });
+    }
+    const images = [];
+    if(Array.isArray(gltf.images)){
+      for(const img of gltf.images){
+        const uri = /^https?:|^data:|^\./.test(img.uri) ? img.uri : (base + img.uri);
+        images.push(await loadImageElement(uri));
+      }
+    }
+    const glTextures = [];
+    if(Array.isArray(gltf.textures)){
+      for(const t of gltf.textures){
+        const img = images[t.source];
+        if(!img){ glTextures.push(null); continue; }
+        const tex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+        gl.generateMipmap(gl.TEXTURE_2D);
+        glTextures.push(tex);
+      }
+      gl.bindTexture(gl.TEXTURE_2D, null);
+    }
     // Traverse scene graph to build drawables with node transforms
     const drawables = [];
     function buildForNode(nodeIdx, parentMat){
@@ -169,6 +204,15 @@
         for(const prim of mesh.primitives){
           const draw = makeVaoForPrimitive(gl, programLoc, gltf, buffers, prim);
           draw.nodeMatrix = worldMat;
+          // Attach material textures if present
+          if(typeof prim.material === 'number' && gltf.materials && gltf.materials[prim.material]){
+            const mat = gltf.materials[prim.material] || {};
+            const pbr = mat.pbrMetallicRoughness || {};
+            const baseTexIdx = pbr.baseColorTexture && typeof pbr.baseColorTexture.index === 'number' ? pbr.baseColorTexture.index : null;
+            const mrTexIdx = pbr.metallicRoughnessTexture && typeof pbr.metallicRoughnessTexture.index === 'number' ? pbr.metallicRoughnessTexture.index : null;
+            draw.material.baseTex = (baseTexIdx!==null) ? glTextures[baseTexIdx] : null;
+            draw.material.mrTex = (mrTexIdx!==null) ? glTextures[mrTexIdx] : null;
+          }
           drawables.push(draw);
         }
       }

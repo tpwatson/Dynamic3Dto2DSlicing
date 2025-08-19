@@ -527,8 +527,12 @@ uniform float u_checkerSize; // world units per cell
 uniform float u_checkerAlpha; // opacity of checker overlay
   uniform bool  u_checkerScreen; // when true, checker grid is screen-space per band
 uniform int   u_activeBand; // -1 = render all; 0..13 = only that band (others discard)
-uniform int   u_renderMode; // 0 = terrain stylized, 1 = model (solid shading)
+uniform int   u_renderMode; // 0 = terrain stylized, 1 = model (lit PBR-ish)
 // Outline controls
+// Model material uniforms
+uniform vec3  u_baseColor;   // model base color (albedo)
+uniform float u_metallic;    // 0..1
+uniform float u_roughness;   // 0.04..1
 uniform bool  u_outlineOn;      // enable black edge outlines
 uniform float u_outlineScale;   // scales edge sensitivity
 uniform float u_outlineIntensity; // 0..1 how strongly to darken to black on edges
@@ -583,10 +587,9 @@ float bandIndex(float d, float maxD, float N){
     vec3 V = normalize(u_camPos - v_world);
     vec3 L = normalize(-u_lightDir);
     vec3 H = normalize(V+L);
-    // Uniforms are packed via u_lightColor for base RGB and metallic in blue; roughness via u_ambient
-    float metallic = clamp(u_lightColor.z, 0.0, 1.0);
-    float roughness = clamp(u_ambient, 0.04, 1.0);
-    vec3 baseColor = vec3(u_lightColor.x, u_lightColor.y, 1.0);
+    float metallic = clamp(u_metallic, 0.0, 1.0);
+    float roughness = clamp(u_roughness, 0.04, 1.0);
+    vec3 baseColor = clamp(u_baseColor, 0.0, 1.0);
     float NdotL = max(dot(n,L), 0.0);
     float NdotV = max(dot(n,V), 0.0);
     float NdotH = max(dot(n,H), 0.0);
@@ -604,7 +607,21 @@ float bandIndex(float d, float maxD, float N){
     vec3 spec = (D * G) * F / max(4.0 * NdotV * NdotL, 1e-4);
     vec3 kd = (1.0 - F) * (1.0 - metallic);
     vec3 diffuse = kd * baseColor / 3.14159;
-    vec3 color = (diffuse + spec) * NdotL;
+    vec3 color = (diffuse + spec) * NdotL * u_lightColor + baseColor * clamp(u_ambient, 0.0, 1.0);
+    // Optional edge outline for model to enhance readability against ground
+    if(u_outlineOn){
+      float nEdge = length(fwidth(n));
+      float zEdge = fwidth(v_eyeZ / max(u_maxDist, 1e-3));
+      float slope = 1.0 - abs(n.y);
+      float slopeChange = fwidth(slope);
+      float rim = smoothstep(0.65, 0.92, 1.0 - abs(dot(n, V)));
+      rim *= smoothstep(0.25, 0.55, slope);
+      float edge = (nEdge * 1.0 + zEdge * 0.5 + slopeChange * 2.0 + rim * 1.2) * u_outlineScale;
+      float t0 = 0.045;
+      float t1 = 0.16;
+      float edgeMask = smoothstep(t0, t1, edge);
+      color = mix(color, vec3(0.0), clamp(edgeMask * u_outlineIntensity, 0.0, 1.0));
+    }
     o_color = vec4(color, 1.0);
     return;
   }
@@ -742,6 +759,9 @@ const loc = {
   u_checkerScreen: gl.getUniformLocation(prog,'u_checkerScreen'),
   u_activeBand: gl.getUniformLocation(prog,'u_activeBand'),
   u_renderMode: gl.getUniformLocation(prog,'u_renderMode'),
+  u_baseColor: gl.getUniformLocation(prog,'u_baseColor'),
+  u_metallic: gl.getUniformLocation(prog,'u_metallic'),
+  u_roughness: gl.getUniformLocation(prog,'u_roughness'),
   // outline uniforms
   u_outlineOn: gl.getUniformLocation(prog,'u_outlineOn'),
   u_outlineScale: gl.getUniformLocation(prog,'u_outlineScale'),
@@ -1193,6 +1213,22 @@ function frame(t){
       gl.uniform1i(loc.u_activeBand, bandIndexToRender);
       for(const d of playerModel.drawables){
         gl.bindVertexArray(d.vao);
+        // Set material if present
+        if(d.material){
+          const base = d.material.base || [0.6,0.6,0.6,1];
+          const metallic = (typeof d.material.metallic==='number') ? d.material.metallic : 0.2;
+          const roughness = (typeof d.material.roughness==='number') ? d.material.roughness : 0.5;
+          gl.uniform3f(loc.u_baseColor, base[0], base[1], base[2]);
+          gl.uniform1f(loc.u_metallic, metallic);
+          gl.uniform1f(loc.u_roughness, roughness);
+          // Bind textures if present
+          if(d.material.baseTex){ gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, d.material.baseTex); }
+          if(d.material.mrTex){ gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, d.material.mrTex); }
+        } else {
+          gl.uniform3f(loc.u_baseColor, 0.5, 0.5, 0.5);
+          gl.uniform1f(loc.u_metallic, 0.15);
+          gl.uniform1f(loc.u_roughness, 0.6);
+        }
         gl.drawElements(d.mode, d.indexCount, d.indexType, d.indexOffsetBytes);
       }
       gl.uniformMatrix4fv(loc.u_model,false,model);
