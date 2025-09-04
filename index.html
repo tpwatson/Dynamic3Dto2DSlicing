@@ -103,7 +103,7 @@
 
 <script>
 /*** ---------- Config ---------- ***/
-const HEIGHTMAP_DATA_URL = `heightmap2.png`;
+const HEIGHTMAP_DATA_URL = `heightmap3.png`;
 /*
 If you want to use your file instead, e.g. "heightmap.png", put it in same folder and:
 const HEIGHTMAP_DATA_URL = "heightmap.png";
@@ -173,7 +173,9 @@ const FINAL_DATA_URL = HEIGHTMAP_DATA_URL;
   // Terrain resolution (vertices per side)
   const GRID = 512;           // try 128–512
 const SIZE = 5000.0;         // world size (XZ span)
-const HEIGHT_SCALE = 1600.0; // how tall the white peaks get
+const HEIGHTSIZE_SMALL = 1600.0;
+const HEIGHTSIZE_LARGE = 6400.0;
+const HEIGHT_SCALE = HEIGHTSIZE_LARGE // how tall the white peaks get
 // Camera FOV used for both projection and skybox ray reconstruction
 const FOVY = 60 * Math.PI / 180;
 
@@ -544,6 +546,7 @@ uniform float u_checkerAlpha; // opacity of checker overlay
 uniform int   u_activeBand; // -1 = render all; 0..13 = only that band (others discard)
 uniform int   u_renderMode; // 0 = terrain stylized, 1 = model (lit PBR-ish)
 uniform float u_alpha;      // global alpha for current draw (1 for opaque)
+uniform float u_heightMax;  // maximum expected terrain height for coloring
 // Outline controls
 // Model material uniforms
 uniform vec3  u_baseColor;   // model base color (albedo)
@@ -643,8 +646,28 @@ float bandIndex(float d, float maxD, float N){
     return;
   }
 
-  // Base color from palette by distance layer (slightly brighter palette)
-  vec3 layerColor = min(PALETTE[int(idx)] * 1.25, vec3(1.0));
+  // Elevation-based base color from world height
+  float hNorm = clamp(v_world.y / max(u_heightMax, 1e-3), 0.0, 1.0);
+  // Compress low elevations upward so colors transition sooner
+  hNorm = pow(hNorm, 0.55);
+  vec3 layerColor;
+  if(hNorm < 0.18){
+    // lowest elevations: water/mud blend
+    float t = smoothstep(0.0, 0.18, hNorm);
+    layerColor = mix(vec3(0.10, 0.18, 0.32), vec3(0.40, 0.32, 0.22), t);
+  } else if(hNorm < 0.45){
+    // mid elevations: dirt to grass
+    float t = smoothstep(0.18, 0.45, hNorm);
+    layerColor = mix(vec3(0.40, 0.32, 0.22), vec3(0.28, 0.55, 0.30), t);
+  } else if(hNorm < 0.78){
+    // highlands: green to rocky
+    float t = smoothstep(0.45, 0.78, hNorm);
+    layerColor = mix(vec3(0.28, 0.55, 0.30), vec3(0.60, 0.58, 0.55), t);
+  } else {
+    // peaks: rock to snow
+    float t = smoothstep(0.78, 1.0, hNorm);
+    layerColor = mix(vec3(0.60, 0.58, 0.55), vec3(0.95, 0.95, 0.98), t);
+  }
   // Brighter mid-day lighting
   float lambert = max(dot(normalize(v_norm), normalize(-u_lightDir)), 0.0);
   float lightIntensity = clamp(u_ambient + lambert * 1.2, 0.0, 2.0);
@@ -785,6 +808,7 @@ const loc = {
   u_outlineScale: gl.getUniformLocation(prog,'u_outlineScale'),
   u_outlineIntensity: gl.getUniformLocation(prog,'u_outlineIntensity'),
   u_outlineBand: gl.getUniformLocation(prog,'u_outlineBand'),
+  u_heightMax: gl.getUniformLocation(prog,'u_heightMax'),
 };
 
 const vao = gl.createVertexArray();
@@ -1245,6 +1269,7 @@ function frame(t){
   gl.uniform1f(loc.u_strokePx, STROKE_PX);
   gl.uniform1f(loc.u_variation, VARIATION);
   gl.uniform1f(loc.u_alpha, 1.0);
+  gl.uniform1f(loc.u_heightMax, HEIGHT_SCALE);
   // we will set activeBand per-pass below
   // Lighting uniforms
   const lightDir = normalizeVec3([-0.6, -1.0, -0.4]); // coming from above-left
